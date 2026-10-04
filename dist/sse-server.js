@@ -2084,7 +2084,7 @@ function getOpenApiSchema(baseUrl = "https://mcp.restiq.ge") {
 var app = express();
 app.use(cors());
 app.use(express.json());
-var port = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3005;
+var port = parseInt(process.env.MCP_PORT || process.env.PORT || "3005", 10);
 var transports = /* @__PURE__ */ new Map();
 function createMcpServer() {
   const server = new McpServer2({

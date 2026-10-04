@@ -10,7 +10,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const port = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3005;
+const port = parseInt(process.env.MCP_PORT || process.env.PORT || '3005', 10);
 
 // Store active transports by session ID
 const transports = new Map<string, SSEServerTransport>();
