@@ -25,9 +25,9 @@ function createMcpServer() {
   return server;
 }
 
-// 1. SSE Connection Endpoint (Standard MCP SSE transport)
-app.get('/sse', async (req, res) => {
-  console.log('New incoming SSE MCP client connection');
+// 1. SSE Connection Endpoint (Supports both /sse and /mcp aliases)
+app.get(['/sse', '/mcp'], async (req, res) => {
+  console.log(`New incoming SSE MCP client connection on ${req.path}`);
   const transport = new SSEServerTransport('/messages', res);
   const server = createMcpServer();
 
@@ -40,8 +40,8 @@ app.get('/sse', async (req, res) => {
   });
 });
 
-// 2. Incoming client messages endpoint (POST /messages?sessionId=...)
-app.post('/messages', async (req, res) => {
+// 2. Incoming client messages endpoint (POST /messages?sessionId=... and POST /mcp/messages)
+app.post(['/messages', '/mcp/messages'], async (req, res) => {
   const sessionId = req.query.sessionId as string;
   const transport = transports.get(sessionId);
 

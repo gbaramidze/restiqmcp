@@ -2107,8 +2107,8 @@ function createMcpServer() {
   registerResources(server);
   return server;
 }
-app.get("/sse", async (req, res) => {
-  console.log("New incoming SSE MCP client connection");
+app.get(["/sse", "/mcp"], async (req, res) => {
+  console.log(`New incoming SSE MCP client connection on ${req.path}`);
   const transport = new SSEServerTransport("/messages", res);
   const server = createMcpServer();
   await server.connect(transport);
@@ -2118,7 +2118,7 @@ app.get("/sse", async (req, res) => {
     transports.delete(transport.sessionId);
   });
 });
-app.post("/messages", async (req, res) => {
+app.post(["/messages", "/mcp/messages"], async (req, res) => {
   const sessionId = req.query.sessionId;
   const transport = transports.get(sessionId);
   if (!transport) {
