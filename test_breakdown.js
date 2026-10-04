@@ -4,13 +4,14 @@ async function analyzeDetails() {
   const tenant = await resolveTenant('teatro');
   console.log('--- Analyzing September Day by Day for Teatro ---');
   const septOrders = await fetchAllRows(
-    supabase.from('orders')
+    async (from, to) => supabase.from('orders')
       .select('id, price, discount_amount, date, status')
       .eq('tenant_id', tenant.id)
       .eq('status', 'completed')
       .gte('date', '2026-09-01T00:00:00')
       .lte('date', '2026-09-30T23:59:59')
       .order('date', { ascending: true })
+      .range(from, to)
   );
   
   const days = {};
@@ -30,11 +31,11 @@ async function analyzeDetails() {
     totalRev += d.sum;
     totalDisc += d.discount;
     return {
-      'თარიღი (Day)': day,
-      'შეკვეთები (Orders)': d.count,
-      'შემოსავალი (Rev ₾)': d.sum.toFixed(2),
-      'ფასდაკლება (Disc ₾)': d.discount.toFixed(2),
-      'საშ. ჩეკი (Avg ₾)': (d.sum / d.count).toFixed(2)
+      'თარიღი': day,
+      'ჩეკები': d.count,
+      'შემოსავალი (₾)': d.sum.toFixed(2),
+      'ფასდაკლება (₾)': d.discount.toFixed(2),
+      'საშ. ჩეკი (₾)': (d.sum / d.count).toFixed(2)
     };
   });
   console.table(tableData);
@@ -42,11 +43,12 @@ async function analyzeDetails() {
 
   console.log('\n--- Analyzing Open / Active Orders ---');
   const openOrders = await fetchAllRows(
-    supabase.from('orders')
+    async (from, to) => supabase.from('orders')
       .select('id, table, price, date, status, creator')
       .eq('tenant_id', tenant.id)
       .eq('status', 'open')
       .order('date', { ascending: false })
+      .range(from, to)
   );
   console.log('Total Open Orders in DB:', openOrders.length);
   const now = new Date();
