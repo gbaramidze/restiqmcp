@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import ws from 'ws';
 import { TenantInfo } from './types.js';
 
 // Resolve directory of current module
@@ -32,7 +33,20 @@ if (!supabaseUrl || !supabaseAnonKey) {
   console.error('❌ Warning: SUPABASE_URL or SUPABASE_ANON_KEY is missing. Please ensure your .env file is configured.');
 }
 
-export const supabase: SupabaseClient = createClient(supabaseUrl || '', supabaseAnonKey || '');
+// Polyfill global WebSocket for Node.js < 22 runtime
+if (typeof globalThis.WebSocket === 'undefined') {
+  globalThis.WebSocket = ws as any;
+}
+
+export const supabase: SupabaseClient = createClient(supabaseUrl || '', supabaseAnonKey || '', {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false
+  },
+  realtime: {
+    transport: ws
+  }
+});
 
 /**
  * Universal pagination helper to overcome the default PostgREST 1000-row limit.

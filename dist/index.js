@@ -20,6 +20,7 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
+import ws from "ws";
 async function fetchAllRows(queryBuilder, batchSize = 1e3, maxRows = 1e5) {
   const allRows = [];
   let from = 0;
@@ -168,7 +169,18 @@ var init_db = __esm({
     if (!supabaseUrl || !supabaseAnonKey) {
       console.error("\u274C Warning: SUPABASE_URL or SUPABASE_ANON_KEY is missing. Please ensure your .env file is configured.");
     }
-    supabase = createClient(supabaseUrl || "", supabaseAnonKey || "");
+    if (typeof globalThis.WebSocket === "undefined") {
+      globalThis.WebSocket = ws;
+    }
+    supabase = createClient(supabaseUrl || "", supabaseAnonKey || "", {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false
+      },
+      realtime: {
+        transport: ws
+      }
+    });
   }
 });
 
