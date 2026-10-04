@@ -1818,9 +1818,272 @@ function registerResources(server) {
   );
 }
 
+// src/restApi.ts
+init_db();
+import { Router } from "express";
+init_orderSearch();
+var restRouter = Router();
+restRouter.get("/tenants", async (req, res) => {
+  try {
+    const { data, error } = await supabase.from("tenants").select("id, name, slug, code, currency, tax_id, license_plan, is_active").order("name", { ascending: true });
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ tenants: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+restRouter.get("/today-summary", async (req, res) => {
+  try {
+    const tenant = req.query.tenant || void 0;
+    const date = req.query.date || void 0;
+    const summary = await getTodaySummary(tenant, date);
+    res.json(summary);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+restRouter.get("/shift-report", async (req, res) => {
+  try {
+    const tenant = req.query.tenant || void 0;
+    const shiftId = req.query.shiftId ? parseInt(req.query.shiftId, 10) : void 0;
+    const report = await getShiftAnalytics(tenant, shiftId);
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+restRouter.get("/sales", async (req, res) => {
+  try {
+    const tenant = req.query.tenant || void 0;
+    const period = req.query.period || "today";
+    const startDate = req.query.startDate || void 0;
+    const endDate = req.query.endDate || void 0;
+    const sales = await getSalesAnalytics(tenant, period, startDate, endDate);
+    res.json(sales);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+restRouter.get("/top-items", async (req, res) => {
+  try {
+    const tenant = req.query.tenant || void 0;
+    const period = req.query.period || "today";
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : 10;
+    const startDate = req.query.startDate || void 0;
+    const endDate = req.query.endDate || void 0;
+    const top = await getTopSellingItems(tenant, period, limit, startDate, endDate);
+    res.json(top);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+restRouter.get("/expenses", async (req, res) => {
+  try {
+    const tenant = req.query.tenant || void 0;
+    const period = req.query.period || "this_month";
+    const startDate = req.query.startDate || void 0;
+    const endDate = req.query.endDate || void 0;
+    const expenses = await getExpensesAnalytics(tenant, period, startDate, endDate);
+    res.json(expenses);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+restRouter.get("/inventory-alerts", async (req, res) => {
+  try {
+    const tenant = req.query.tenant || void 0;
+    const threshold = req.query.threshold ? parseFloat(req.query.threshold) : 0;
+    const alerts = await getInventoryAlerts(tenant, threshold);
+    res.json(alerts);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+restRouter.get("/active-orders", async (req, res) => {
+  try {
+    const tenant = req.query.tenant || void 0;
+    const active = await getActiveOrders(tenant);
+    res.json(active);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+restRouter.get("/staff-performance", async (req, res) => {
+  try {
+    const tenant = req.query.tenant || void 0;
+    const period = req.query.period || "today";
+    const startDate = req.query.startDate || void 0;
+    const endDate = req.query.endDate || void 0;
+    const staff = await getStaffPerformance(tenant, period, startDate, endDate);
+    res.json(staff);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+restRouter.get("/search-orders", async (req, res) => {
+  try {
+    const query = req.query.query || "";
+    const tenant = req.query.tenant || void 0;
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : 10;
+    const results = await searchOrders(query, tenant, limit);
+    res.json({ results });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+restRouter.get("/order-details", async (req, res) => {
+  try {
+    const orderId = parseInt(req.query.orderId, 10);
+    const tenant = req.query.tenant || void 0;
+    if (!orderId) return res.status(400).json({ error: "orderId is required" });
+    const order = await getOrderDetails(orderId, tenant);
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+restRouter.get("/delivery-orders", async (req, res) => {
+  try {
+    const tenant = req.query.tenant || void 0;
+    const period = req.query.period || "today";
+    const platform = req.query.platform || "all";
+    const deliveries = await getDeliveryOrders(tenant, period, platform);
+    res.json(deliveries);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+function getOpenApiSchema(baseUrl = "https://mcp.restiq.ge") {
+  return {
+    openapi: "3.0.0",
+    info: {
+      title: "RestIQ POS & Restaurant Analytics API",
+      description: "API for real-time restaurant revenue, shift X/Z reports, sales, top menu items, expenses, delivery and inventory analytics.",
+      version: "1.0.0"
+    },
+    servers: [
+      {
+        url: baseUrl
+      }
+    ],
+    paths: {
+      "/api/today-summary": {
+        get: {
+          operationId: "getTodaySummary",
+          summary: "Get today financial summary (Revenue, Cash In Drawer, Average Check, Discounts)",
+          parameters: [
+            { name: "tenant", in: "query", required: false, schema: { type: "string" }, description: "Tenant name or slug (e.g., teatro, ajarapalace)" },
+            { name: "date", in: "query", required: false, schema: { type: "string" }, description: "Date YYYY-MM-DD (defaults to today)" }
+          ],
+          responses: { "200": { description: "Successful response" } }
+        }
+      },
+      "/api/shift-report": {
+        get: {
+          operationId: "getShiftReport",
+          summary: "Get current active cash shift X/Z report with cashier name, cash vs card sales and discrepancy",
+          parameters: [
+            { name: "tenant", in: "query", required: false, schema: { type: "string" }, description: "Tenant name or slug" },
+            { name: "shiftId", in: "query", required: false, schema: { type: "integer" }, description: "Shift ID (optional, defaults to active shift)" }
+          ],
+          responses: { "200": { description: "Successful response" } }
+        }
+      },
+      "/api/sales": {
+        get: {
+          operationId: "getSalesAnalytics",
+          summary: "Get detailed sales analytics aggregated by period, halls and hourly distribution",
+          parameters: [
+            { name: "tenant", in: "query", required: false, schema: { type: "string" }, description: "Tenant name or slug" },
+            { name: "period", in: "query", required: false, schema: { type: "string", enum: ["today", "yesterday", "this_week", "this_month", "last_month", "custom"] } },
+            { name: "startDate", in: "query", required: false, schema: { type: "string" }, description: "YYYY-MM-DD for custom period" },
+            { name: "endDate", in: "query", required: false, schema: { type: "string" }, description: "YYYY-MM-DD for custom period" }
+          ],
+          responses: { "200": { description: "Successful response" } }
+        }
+      },
+      "/api/top-items": {
+        get: {
+          operationId: "getTopSellingItems",
+          summary: "Get top selling dishes, drinks and hookah items classified into Kitchen, Bar and Hookah",
+          parameters: [
+            { name: "tenant", in: "query", required: false, schema: { type: "string" }, description: "Tenant name or slug" },
+            { name: "period", in: "query", required: false, schema: { type: "string", enum: ["today", "yesterday", "this_week", "this_month", "last_month", "custom"] } },
+            { name: "limit", in: "query", required: false, schema: { type: "integer" }, description: "Number of items to return (default 10)" }
+          ],
+          responses: { "200": { description: "Successful response" } }
+        }
+      },
+      "/api/expenses": {
+        get: {
+          operationId: "getExpensesAnalytics",
+          summary: "Get expenses breakdown (supplier payments, cash drawer payouts, write-offs)",
+          parameters: [
+            { name: "tenant", in: "query", required: false, schema: { type: "string" }, description: "Tenant name or slug" },
+            { name: "period", in: "query", required: false, schema: { type: "string", enum: ["today", "yesterday", "this_week", "this_month", "last_month", "custom"] } }
+          ],
+          responses: { "200": { description: "Successful response" } }
+        }
+      },
+      "/api/inventory-alerts": {
+        get: {
+          operationId: "getInventoryAlerts",
+          summary: "Get inventory stock alerts and out-of-stock / zero-stock items",
+          parameters: [
+            { name: "tenant", in: "query", required: false, schema: { type: "string" }, description: "Tenant name or slug" },
+            { name: "threshold", in: "query", required: false, schema: { type: "number" }, description: "Min stock threshold (default 0)" }
+          ],
+          responses: { "200": { description: "Successful response" } }
+        }
+      },
+      "/api/active-orders": {
+        get: {
+          operationId: "getActiveOrders",
+          summary: "Get real-time currently occupied tables and active open orders in the restaurant",
+          parameters: [
+            { name: "tenant", in: "query", required: false, schema: { type: "string" }, description: "Tenant name or slug" }
+          ],
+          responses: { "200": { description: "Successful response" } }
+        }
+      },
+      "/api/staff-performance": {
+        get: {
+          operationId: "getStaffPerformance",
+          summary: "Get waiter/cashier sales leaderboard and order counts",
+          parameters: [
+            { name: "tenant", in: "query", required: false, schema: { type: "string" }, description: "Tenant name or slug" },
+            { name: "period", in: "query", required: false, schema: { type: "string", enum: ["today", "yesterday", "this_week", "this_month", "last_month", "custom"] } }
+          ],
+          responses: { "200": { description: "Successful response" } }
+        }
+      },
+      "/api/delivery-orders": {
+        get: {
+          operationId: "getDeliveryOrders",
+          summary: "Get delivery platform orders (Glovo, Wolt, Bolt Food, Web QR Delivery)",
+          parameters: [
+            { name: "tenant", in: "query", required: false, schema: { type: "string" }, description: "Tenant name or slug" },
+            { name: "period", in: "query", required: false, schema: { type: "string", enum: ["today", "yesterday", "this_week", "this_month"] } },
+            { name: "platform", in: "query", required: false, schema: { type: "string", enum: ["all", "glovo", "wolt", "bolt", "web"] } }
+          ],
+          responses: { "200": { description: "Successful response" } }
+        }
+      },
+      "/api/tenants": {
+        get: {
+          operationId: "listTenants",
+          summary: "List available restaurants and venue branches in the system",
+          responses: { "200": { description: "Successful response" } }
+        }
+      }
+    }
+  };
+}
+
 // src/sse-server.ts
 var app = express();
 app.use(cors());
+app.use(express.json());
 var port = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3005;
 var transports = /* @__PURE__ */ new Map();
 function createMcpServer() {
@@ -1852,6 +2115,13 @@ app.post("/messages", async (req, res) => {
   }
   await transport.handlePostMessage(req, res);
 });
+app.use("/api", restRouter);
+app.get("/openapi.json", (req, res) => {
+  const protocol = req.headers["x-forwarded-proto"] || req.protocol || "https";
+  const host = req.headers["x-forwarded-host"] || req.headers.host || "mcp.restiq.ge";
+  const baseUrl = `${protocol}://${host}`;
+  res.json(getOpenApiSchema(baseUrl));
+});
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
@@ -1862,7 +2132,8 @@ app.get("/health", (req, res) => {
 });
 app.listen(port, () => {
   console.log(`\u{1F310} POS Analytics MCP Server (SSE/HTTP) listening on http://localhost:${port}`);
-  console.log(`\u{1F4E1} SSE Endpoint: http://localhost:${port}/sse`);
+  console.log(`\u{1F4E1} SSE Endpoint (MCP): http://localhost:${port}/sse`);
   console.log(`\u2709\uFE0F Message Endpoint: http://localhost:${port}/messages`);
+  console.log(`\u{1F4D6} OpenAPI Spec (ChatGPT Actions): http://localhost:${port}/openapi.json`);
   console.log(`\u2764\uFE0F Health Check: http://localhost:${port}/health`);
 });

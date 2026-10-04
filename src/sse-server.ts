@@ -4,9 +4,11 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { registerTools } from './tools.js';
 import { registerResources } from './resources.js';
+import { restRouter, getOpenApiSchema } from './restApi.js';
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
 const port = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3005;
 
@@ -23,7 +25,7 @@ function createMcpServer() {
   return server;
 }
 
-// SSE Connection Endpoint
+// 1. SSE Connection Endpoint (Standard MCP SSE transport)
 app.get('/sse', async (req, res) => {
   console.log('New incoming SSE MCP client connection');
   const transport = new SSEServerTransport('/messages', res);
@@ -38,7 +40,7 @@ app.get('/sse', async (req, res) => {
   });
 });
 
-// Incoming client messages endpoint (POST /messages?sessionId=...)
+// 2. Incoming client messages endpoint (POST /messages?sessionId=...)
 app.post('/messages', async (req, res) => {
   const sessionId = req.query.sessionId as string;
   const transport = transports.get(sessionId);
@@ -51,7 +53,18 @@ app.post('/messages', async (req, res) => {
   await transport.handlePostMessage(req, res);
 });
 
-// Health check endpoint
+// 3. REST API Routes for Direct Integration / ChatGPT Custom GPT Actions
+app.use('/api', restRouter);
+
+// 4. OpenAPI Specification Endpoint (for ChatGPT GPT Builder Actions)
+app.get('/openapi.json', (req, res) => {
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+  const host = req.headers['x-forwarded-host'] || req.headers.host || 'mcp.restiq.ge';
+  const baseUrl = `${protocol}://${host}`;
+  res.json(getOpenApiSchema(baseUrl));
+});
+
+// 5. Health check endpoint
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -63,7 +76,8 @@ app.get('/health', (req, res) => {
 
 app.listen(port, () => {
   console.log(`🌐 POS Analytics MCP Server (SSE/HTTP) listening on http://localhost:${port}`);
-  console.log(`📡 SSE Endpoint: http://localhost:${port}/sse`);
+  console.log(`📡 SSE Endpoint (MCP): http://localhost:${port}/sse`);
   console.log(`✉️ Message Endpoint: http://localhost:${port}/messages`);
+  console.log(`📖 OpenAPI Spec (ChatGPT Actions): http://localhost:${port}/openapi.json`);
   console.log(`❤️ Health Check: http://localhost:${port}/health`);
 });
