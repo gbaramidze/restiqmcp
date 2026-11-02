@@ -1271,6 +1271,793 @@ async function getStaffPerformance(tenantIdentifier, period = "today", customSta
   };
 }
 
+// src/analytics/purchasesAnalytics.ts
+init_db();
+async function getPurchasesAnalytics(tenantIdentifier, period = "this_month", customStart, customEnd, filterSupplierId, filterWarehouse) {
+  const tenant = await resolveTenant(tenantIdentifier);
+  const bounds = getPeriodBounds(period, customStart, customEnd);
+  const { data: suppliersData } = await supabase.from("momwodeblebi").select("id, name, code, contact, person").eq("tenant_id", tenant.id);
+  const supplierMap = /* @__PURE__ */ new Map();
+  (suppliersData || []).forEach((s) => supplierMap.set(String(s.id), s));
+  const { data: unitsData } = await supabase.from("units").select("id, name, short_name");
+  const unitMap = /* @__PURE__ */ new Map();
+  (unitsData || []).forEach((u) => unitMap.set(u.id, u.short_name || u.name));
+  const migebaRows = await fetchAllRows(async (from, to) => {
+    let q = supabase.from("migeba").select("id, name, price, count, code, ert, need, dealer, date, type").eq("tenant_id", tenant.id).gte("date", bounds.start).lte("date", bounds.end).order("date", { ascending: false });
+    if (filterSupplierId !== void 0 && filterSupplierId !== null && filterSupplierId !== "") {
+      q = q.eq("dealer", String(filterSupplierId));
+    }
+    if (filterWarehouse && filterWarehouse !== "ALL" && filterWarehouse !== "\u10E7\u10D5\u10D4\u10DA\u10D0") {
+      q = q.eq("type", filterWarehouse);
+    }
+    return q.range(from, to);
+  });
+  let totalPurchaseAmount = 0;
+  let totalQuantity = 0;
+  const invoiceSet = /* @__PURE__ */ new Set();
+  const invoiceMap = /* @__PURE__ */ new Map();
+  const supSummaryMap = /* @__PURE__ */ new Map();
+  const whSummaryMap = /* @__PURE__ */ new Map();
+  const productSummaryMap = /* @__PURE__ */ new Map();
+  for (const row of migebaRows) {
+    const price = parseFloat(row.price) || 0;
+    const count = parseFloat(row.count) || 0;
+    const lineTotal = price * count;
+    const invCode = row.code || `NO-CODE-${row.id}`;
+    const supplierObj = supplierMap.get(String(row.dealer));
+    const supplierName = supplierObj ? supplierObj.name : row.dealer ? `\u10DB\u10DD\u10DB\u10EC\u10DD\u10D3\u10D4\u10D1\u10D4\u10DA\u10D8 #${row.dealer}` : "\u10E3\u10EA\u10DC\u10DD\u10D1\u10D8 / \u10DB\u10D8\u10E3\u10D7\u10D8\u10D7\u10D4\u10D1\u10D4\u10DA\u10D8";
+    const unitName = unitMap.get(row.ert) || "\u10EA";
+    const whType = row.type || "main";
+    totalPurchaseAmount += lineTotal;
+    totalQuantity += count;
+    invoiceSet.add(invCode);
+    const existingInv = invoiceMap.get(invCode);
+    if (!existingInv) {
+      invoiceMap.set(invCode, {
+        invoice_code: row.code || "\u2014",
+        supplier_name: supplierName,
+        date: row.date,
+        warehouse_type: whType,
+        items_count: 1,
+        total_amount: lineTotal
+      });
+    } else {
+      existingInv.items_count += 1;
+      existingInv.total_amount += lineTotal;
+    }
+    const supKey = String(row.dealer || "unknown");
+    const existingSup = supSummaryMap.get(supKey);
+    if (!existingSup) {
+      const s = /* @__PURE__ */ new Set();
+      if (row.code) s.add(row.code);
+      supSummaryMap.set(supKey, {
+        supplier_id: supKey,
+        supplier_name: supplierName,
+        supplier_code: supplierObj?.code,
+        total_amount: lineTotal,
+        invoices: s,
+        items_count: 1
+      });
+    } else {
+      existingSup.total_amount += lineTotal;
+      existingSup.items_count += 1;
+      if (row.code) existingSup.invoices.add(row.code);
+    }
+    const whName = whType === "bar" ? "\u10D1\u10D0\u10E0\u10D8" : whType === "restourant" || whType === "kitchen" ? "\u10E1\u10D0\u10DB\u10D6\u10D0\u10E0\u10D4\u10E3\u10DA\u10DD" : "\u10DB\u10D7\u10D0\u10D5\u10D0\u10E0\u10D8 \u10E1\u10D0\u10EC\u10E7\u10DD\u10D1\u10D8";
+    const existingWh = whSummaryMap.get(whType);
+    if (!existingWh) {
+      whSummaryMap.set(whType, {
+        warehouse_type: whType,
+        warehouse_name: whName,
+        total_amount: lineTotal,
+        items_count: 1
+      });
+    } else {
+      existingWh.total_amount += lineTotal;
+      existingWh.items_count += 1;
+    }
+    const prodKey = (row.name || "\u10E3\u10E1\u10D0\u10EE\u10D4\u10DA\u10DD").trim();
+    const existingProd = productSummaryMap.get(prodKey);
+    if (!existingProd) {
+      productSummaryMap.set(prodKey, {
+        product_name: prodKey,
+        total_amount: lineTotal,
+        total_quantity: count,
+        unit_name: unitName,
+        purchases_count: 1
+      });
+    } else {
+      existingProd.total_amount += lineTotal;
+      existingProd.total_quantity += count;
+      existingProd.purchases_count += 1;
+    }
+  }
+  const suppliersSummary = Array.from(supSummaryMap.values()).map((s) => ({
+    supplier_id: s.supplier_id,
+    supplier_name: s.supplier_name,
+    supplier_code: s.supplier_code,
+    total_amount: Number(s.total_amount.toFixed(2)),
+    invoices_count: s.invoices.size || s.items_count,
+    items_count: s.items_count
+  })).sort((a, b) => b.total_amount - a.total_amount);
+  const warehouseBreakdown = Array.from(whSummaryMap.values()).map((w) => ({
+    warehouse_type: w.warehouse_type,
+    warehouse_name: w.warehouse_name,
+    total_amount: Number(w.total_amount.toFixed(2)),
+    items_count: w.items_count
+  })).sort((a, b) => b.total_amount - a.total_amount);
+  const topPurchasedProducts = Array.from(productSummaryMap.values()).map((p) => ({
+    product_name: p.product_name,
+    total_amount: Number(p.total_amount.toFixed(2)),
+    total_quantity: Number(p.total_quantity.toFixed(3)),
+    unit_name: p.unit_name,
+    average_unit_price: p.total_quantity > 0 ? Number((p.total_amount / p.total_quantity).toFixed(2)) : 0,
+    purchases_count: p.purchases_count
+  })).sort((a, b) => b.total_amount - a.total_amount).slice(0, 25);
+  const recentInvoices = Array.from(invoiceMap.values()).map((inv) => ({
+    ...inv,
+    total_amount: Number(inv.total_amount.toFixed(2))
+  })).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 20);
+  const totalInvoicesCount = invoiceSet.size;
+  const avgInvoiceAmount = totalInvoicesCount > 0 ? totalPurchaseAmount / totalInvoicesCount : 0;
+  return {
+    tenant: {
+      id: tenant.id,
+      name: tenant.name,
+      currency: tenant.currency || "GEL"
+    },
+    period_label: bounds.label,
+    start_date: bounds.start,
+    end_date: bounds.end,
+    summary: {
+      total_purchase_amount: Number(totalPurchaseAmount.toFixed(2)),
+      total_invoices_count: totalInvoicesCount,
+      total_items_count: migebaRows.length,
+      total_quantity: Number(totalQuantity.toFixed(2)),
+      average_invoice_amount: Number(avgInvoiceAmount.toFixed(2)),
+      currency: tenant.currency || "GEL"
+    },
+    warehouse_breakdown: warehouseBreakdown,
+    suppliers_summary: suppliersSummary,
+    top_purchased_products: topPurchasedProducts,
+    recent_invoices: recentInvoices
+  };
+}
+async function searchPurchases(tenantIdentifier, options = {}) {
+  const tenant = await resolveTenant(tenantIdentifier);
+  const limit = options.limit || 30;
+  const { data: suppliersData } = await supabase.from("momwodeblebi").select("id, name, code").eq("tenant_id", tenant.id);
+  const supplierMap = new Map((suppliersData || []).map((s) => [String(s.id), s]));
+  const { data: unitsData } = await supabase.from("units").select("id, name, short_name");
+  const unitMap = new Map((unitsData || []).map((u) => [u.id, u.short_name || u.name]));
+  let queryBuilder = supabase.from("migeba").select("id, name, price, count, code, ert, need, dealer, date, type").eq("tenant_id", tenant.id).order("date", { ascending: false });
+  if (options.period || options.startDate && options.endDate) {
+    const bounds = getPeriodBounds(options.period || "custom", options.startDate, options.endDate);
+    queryBuilder = queryBuilder.gte("date", bounds.start).lte("date", bounds.end);
+  }
+  if (options.supplierId) {
+    queryBuilder = queryBuilder.eq("dealer", String(options.supplierId));
+  }
+  if (options.warehouse && options.warehouse !== "ALL") {
+    queryBuilder = queryBuilder.eq("type", options.warehouse);
+  }
+  if (options.query) {
+    const q = options.query.trim();
+    queryBuilder = queryBuilder.or(`code.ilike.%${q}%,name.ilike.%${q}%`);
+  }
+  const { data: rows, error } = await queryBuilder.limit(limit);
+  if (error) throw error;
+  const items = (rows || []).map((r) => {
+    const price = parseFloat(r.price) || 0;
+    const count = parseFloat(r.count) || 0;
+    const supObj = supplierMap.get(String(r.dealer));
+    return {
+      id: r.id,
+      product_name: r.name,
+      quantity: count,
+      unit_price: price,
+      total_price: Number((price * count).toFixed(2)),
+      unit_name: unitMap.get(r.ert) || "\u10EA",
+      invoice_code: r.code || "\u2014",
+      supplier_id: r.dealer,
+      supplier_name: supObj ? supObj.name : r.dealer ? `\u10DB\u10DD\u10DB\u10EC\u10DD\u10D3\u10D4\u10D1\u10D4\u10DA\u10D8 #${r.dealer}` : "\u10E3\u10EA\u10DC\u10DD\u10D1\u10D8",
+      warehouse_type: r.type || "main",
+      date: r.date
+    };
+  });
+  return {
+    tenant_name: tenant.name,
+    total_found: items.length,
+    items
+  };
+}
+async function getPurchaseDetails(invoiceCodeOrId, tenantIdentifier) {
+  const tenant = await resolveTenant(tenantIdentifier);
+  const { data: suppliersData } = await supabase.from("momwodeblebi").select("id, name, code, contact, person").eq("tenant_id", tenant.id);
+  const supplierMap = new Map((suppliersData || []).map((s) => [String(s.id), s]));
+  const { data: unitsData } = await supabase.from("units").select("id, name, short_name");
+  const unitMap = new Map((unitsData || []).map((u) => [u.id, u.short_name || u.name]));
+  const codeStr = String(invoiceCodeOrId).trim();
+  let query = supabase.from("migeba").select("id, name, price, count, code, ert, need, dealer, date, type").eq("tenant_id", tenant.id);
+  if (/^\d+$/.test(codeStr) && codeStr.length < 7) {
+    query = query.or(`code.eq.${codeStr},id.eq.${codeStr}`);
+  } else {
+    query = query.eq("code", codeStr);
+  }
+  const { data: rows, error } = await query.order("id", { ascending: true });
+  if (error) throw error;
+  if (!rows || rows.length === 0) {
+    throw new Error(`\u10E8\u10D4\u10E1\u10E7\u10D8\u10D3\u10D5\u10D0/\u10D6\u10D4\u10D3\u10DC\u10D0\u10D3\u10D4\u10D1\u10D8 \u10D9\u10DD\u10D3\u10D8\u10D7 \u10D0\u10DC ID-\u10D8\u10D7 "${invoiceCodeOrId}" \u10D5\u10D4\u10E0 \u10DB\u10DD\u10D8\u10EB\u10D4\u10D1\u10DC\u10D0.`);
+  }
+  let totalInvoiceSum = 0;
+  let totalItemsCount = 0;
+  const sample = rows[0];
+  const supObj = supplierMap.get(String(sample.dealer));
+  const items = rows.map((r) => {
+    const price = parseFloat(r.price) || 0;
+    const count = parseFloat(r.count) || 0;
+    const lineTotal = price * count;
+    totalInvoiceSum += lineTotal;
+    totalItemsCount += 1;
+    return {
+      id: r.id,
+      product_name: r.name,
+      quantity: count,
+      unit_price: price,
+      total_price: Number(lineTotal.toFixed(2)),
+      unit_name: unitMap.get(r.ert) || "\u10EA",
+      warehouse_type: r.type || "main"
+    };
+  });
+  return {
+    tenant_name: tenant.name,
+    invoice_code: sample.code || String(sample.id),
+    date: sample.date,
+    supplier: {
+      id: sample.dealer,
+      name: supObj ? supObj.name : sample.dealer ? `\u10DB\u10DD\u10DB\u10EC\u10DD\u10D3\u10D4\u10D1\u10D4\u10DA\u10D8 #${sample.dealer}` : "\u10E3\u10EA\u10DC\u10DD\u10D1\u10D8",
+      code: supObj?.code,
+      contact: supObj?.contact,
+      person: supObj?.person
+    },
+    warehouse_type: sample.type || "main",
+    total_items_count: totalItemsCount,
+    grand_total: Number(totalInvoiceSum.toFixed(2)),
+    currency: tenant.currency || "GEL",
+    items
+  };
+}
+
+// src/analytics/inventoriesAnalytics.ts
+init_db();
+async function getInventoryActs(tenantIdentifier, options = {}) {
+  const tenant = await resolveTenant(tenantIdentifier);
+  const limit = options.limit || 30;
+  const { data: usersData } = await supabase.from("users").select("id, name, username");
+  const userMap = /* @__PURE__ */ new Map();
+  (usersData || []).forEach((u) => userMap.set(u.id, u.name || u.username));
+  let query = supabase.from("inventory_acts").select("id, created_at, created_by, warehouse_type, category_id, comment, status, total_items, shortage_amount, surplus_amount, net_amount, tenant_id").eq("tenant_id", tenant.id).order("created_at", { ascending: false });
+  let periodLabel;
+  if (options.period && options.period !== "all") {
+    const bounds = getPeriodBounds(options.period, options.startDate, options.endDate);
+    periodLabel = bounds.label;
+    query = query.gte("created_at", bounds.start).lte("created_at", bounds.end);
+  } else if (options.startDate && options.endDate) {
+    const bounds = getPeriodBounds("custom", options.startDate, options.endDate);
+    periodLabel = bounds.label;
+    query = query.gte("created_at", bounds.start).lte("created_at", bounds.end);
+  }
+  if (options.warehouse && options.warehouse !== "ALL" && options.warehouse !== "\u10E7\u10D5\u10D4\u10DA\u10D0") {
+    query = query.eq("warehouse_type", options.warehouse);
+  }
+  if (options.status && options.status !== "all") {
+    query = query.eq("status", options.status);
+  }
+  const { data: actsData, error } = await query.limit(limit);
+  if (error) throw error;
+  let totalItemsChecked = 0;
+  let totalShortage = 0;
+  let totalSurplus = 0;
+  let totalNet = 0;
+  const acts = (actsData || []).map((a) => {
+    const shortage = parseFloat(a.shortage_amount) || 0;
+    const surplus = parseFloat(a.surplus_amount) || 0;
+    const net = parseFloat(a.net_amount) || 0;
+    const itemsCount = parseInt(a.total_items, 10) || 0;
+    totalItemsChecked += itemsCount;
+    totalShortage += shortage;
+    totalSurplus += surplus;
+    totalNet += net;
+    return {
+      id: a.id,
+      date: a.created_at,
+      created_at: a.created_at,
+      warehouse_type: a.warehouse_type || "\u10E7\u10D5\u10D4\u10DA\u10D0",
+      comment: a.comment || "",
+      status: a.status || "completed",
+      total_items: itemsCount,
+      shortage_amount: Number(shortage.toFixed(2)),
+      surplus_amount: Number(surplus.toFixed(2)),
+      net_amount: Number(net.toFixed(2)),
+      created_by_name: a.created_by ? userMap.get(a.created_by) || `\u10DB\u10DD\u10DB\u10EE\u10DB\u10D0\u10E0\u10D4\u10D1\u10D4\u10DA\u10D8 #${a.created_by}` : void 0
+    };
+  });
+  return {
+    tenant: {
+      id: tenant.id,
+      name: tenant.name,
+      currency: tenant.currency || "GEL"
+    },
+    period_label: periodLabel,
+    summary: {
+      total_acts_count: acts.length,
+      total_items_checked: totalItemsChecked,
+      total_shortage_amount: Number(totalShortage.toFixed(2)),
+      total_surplus_amount: Number(totalSurplus.toFixed(2)),
+      total_net_discrepancy: Number(totalNet.toFixed(2)),
+      currency: tenant.currency || "GEL"
+    },
+    acts
+  };
+}
+async function getInventoryActDetails(actId, tenantIdentifier) {
+  const tenant = await resolveTenant(tenantIdentifier);
+  const { data: act, error: actErr } = await supabase.from("inventory_acts").select("*").eq("id", actId).eq("tenant_id", tenant.id).maybeSingle();
+  if (actErr) throw actErr;
+  if (!act) {
+    throw new Error(`\u10D8\u10DC\u10D5\u10D4\u10DC\u10E2\u10D0\u10E0\u10D8\u10D6\u10D0\u10EA\u10D8\u10D8\u10E1 \u10D0\u10E5\u10E2\u10D8 #${actId} \u10D5\u10D4\u10E0 \u10DB\u10DD\u10D8\u10EB\u10D4\u10D1\u10DC\u10D0.`);
+  }
+  let creatorName = "\u10E3\u10EA\u10DC\u10DD\u10D1\u10D8";
+  if (act.created_by) {
+    const { data: user } = await supabase.from("users").select("name, username").eq("id", act.created_by).maybeSingle();
+    if (user) creatorName = user.name || user.username;
+  }
+  const { data: itemsData, error: itemsErr } = await supabase.from("inventory_act_items").select("*").eq("act_id", actId).order("id", { ascending: true });
+  if (itemsErr) throw itemsErr;
+  const items = (itemsData || []).map((it) => {
+    const diff = parseFloat(it.difference) || 0;
+    const diffAmt = parseFloat(it.diff_amount) || 0;
+    const price = parseFloat(it.price) || 0;
+    const exp = parseFloat(it.expected_stock) || 0;
+    const actStock = parseFloat(it.actual_stock) || 0;
+    let status = "EXACT";
+    if (diff < -1e-4 || diffAmt < -0.01) {
+      status = "SHORTAGE";
+    } else if (diff > 1e-4 || diffAmt > 0.01) {
+      status = "SURPLUS";
+    }
+    return {
+      id: it.id,
+      product_id: it.product_id,
+      product_name: it.product_name || `\u10DE\u10E0\u10DD\u10D3\u10E3\u10E5\u10E2\u10D8 #${it.product_id}`,
+      unit_name: it.unit_name || "\u10EA",
+      price: Number(price.toFixed(3)),
+      expected_stock: Number(exp.toFixed(3)),
+      actual_stock: Number(actStock.toFixed(3)),
+      difference: Number(diff.toFixed(3)),
+      diff_amount: Number(diffAmt.toFixed(2)),
+      status
+    };
+  });
+  const shortages = items.filter((i) => i.status === "SHORTAGE").sort((a, b) => a.diff_amount - b.diff_amount);
+  const surpluses = items.filter((i) => i.status === "SURPLUS").sort((a, b) => b.diff_amount - a.diff_amount);
+  const exacts = items.filter((i) => i.status === "EXACT");
+  return {
+    tenant_name: tenant.name,
+    act: {
+      id: act.id,
+      created_at: act.created_at,
+      warehouse_type: act.warehouse_type || "\u10E7\u10D5\u10D4\u10DA\u10D0",
+      created_by_name: creatorName,
+      comment: act.comment || "",
+      status: act.status || "completed",
+      total_items_checked: items.length,
+      shortage_amount: Number((parseFloat(act.shortage_amount) || 0).toFixed(2)),
+      surplus_amount: Number((parseFloat(act.surplus_amount) || 0).toFixed(2)),
+      net_amount: Number((parseFloat(act.net_amount) || 0).toFixed(2)),
+      currency: tenant.currency || "GEL"
+    },
+    statistics: {
+      total_items_count: items.length,
+      shortages_count: shortages.length,
+      surpluses_count: surpluses.length,
+      exact_count: exacts.length
+    },
+    top_shortages: shortages.slice(0, 15),
+    top_surpluses: surpluses.slice(0, 15),
+    all_items: items
+  };
+}
+async function getInventoryDiscrepancySummary(tenantIdentifier, period = "this_month", customStart, customEnd) {
+  const tenant = await resolveTenant(tenantIdentifier);
+  const bounds = getPeriodBounds(period, customStart, customEnd);
+  const { data: acts, error } = await supabase.from("inventory_acts").select("id, created_at, warehouse_type, shortage_amount, surplus_amount, net_amount").eq("tenant_id", tenant.id).gte("created_at", bounds.start).lte("created_at", bounds.end);
+  if (error) throw error;
+  const actIds = (acts || []).map((a) => a.id);
+  if (actIds.length === 0) {
+    return {
+      tenant_name: tenant.name,
+      period_label: bounds.label,
+      total_audits_count: 0,
+      total_shortages_sum: 0,
+      total_surpluses_sum: 0,
+      net_balance: 0,
+      problematic_products: []
+    };
+  }
+  const { data: actItems } = await supabase.from("inventory_act_items").select("product_id, product_name, unit_name, price, difference, diff_amount").in("act_id", actIds);
+  const productAggMap = /* @__PURE__ */ new Map();
+  let totalShortage = 0;
+  let totalSurplus = 0;
+  (actItems || []).forEach((it) => {
+    const diff = parseFloat(it.difference) || 0;
+    const diffAmt = parseFloat(it.diff_amount) || 0;
+    if (Math.abs(diff) < 1e-4 && Math.abs(diffAmt) < 0.01) return;
+    const key = String(it.product_id || it.product_name);
+    const existing = productAggMap.get(key) || {
+      product_id: it.product_id,
+      product_name: it.product_name || `\u10DE\u10E0\u10DD\u10D3\u10E3\u10E5\u10E2\u10D8 #${it.product_id}`,
+      unit_name: it.unit_name || "\u10EA",
+      total_shortage_qty: 0,
+      total_shortage_amount: 0,
+      total_surplus_qty: 0,
+      total_surplus_amount: 0,
+      net_diff_amount: 0,
+      discrepancy_occurrences: 0
+    };
+    existing.discrepancy_occurrences += 1;
+    existing.net_diff_amount += diffAmt;
+    if (diffAmt < 0) {
+      existing.total_shortage_qty += Math.abs(diff);
+      existing.total_shortage_amount += Math.abs(diffAmt);
+      totalShortage += Math.abs(diffAmt);
+    } else {
+      existing.total_surplus_qty += diff;
+      existing.total_surplus_amount += diffAmt;
+      totalSurplus += diffAmt;
+    }
+    productAggMap.set(key, existing);
+  });
+  const problematicProducts = Array.from(productAggMap.values()).map((p) => ({
+    ...p,
+    total_shortage_qty: Number(p.total_shortage_qty.toFixed(3)),
+    total_shortage_amount: Number(p.total_shortage_amount.toFixed(2)),
+    total_surplus_qty: Number(p.total_surplus_qty.toFixed(3)),
+    total_surplus_amount: Number(p.total_surplus_amount.toFixed(2)),
+    net_diff_amount: Number(p.net_diff_amount.toFixed(2))
+  })).sort((a, b) => b.total_shortage_amount - a.total_shortage_amount).slice(0, 25);
+  return {
+    tenant_name: tenant.name,
+    period_label: bounds.label,
+    total_audits_count: acts.length,
+    total_shortages_sum: Number(totalShortage.toFixed(2)),
+    total_surpluses_sum: Number(totalSurplus.toFixed(2)),
+    net_balance: Number((totalSurplus - totalShortage).toFixed(2)),
+    currency: tenant.currency || "GEL",
+    problematic_products: problematicProducts
+  };
+}
+
+// src/analytics/calculationsAnalytics.ts
+init_db();
+async function getRecipeCalculations(tenantIdentifier, options = {}) {
+  const tenant = await resolveTenant(tenantIdentifier);
+  const limit = options.limit || 100;
+  const sortBy = options.sortBy || "food_cost_pct";
+  const sortDirection = options.sortDirection || "desc";
+  const { data: categoriesData } = await supabase.from("categories").select("id, name, hash, type").eq("tenant_id", tenant.id);
+  const categoryMap = /* @__PURE__ */ new Map();
+  (categoriesData || []).forEach((c) => {
+    if (c.hash) categoryMap.set(c.hash, c.name);
+    if (c.id) categoryMap.set(String(c.id), c.name);
+  });
+  const { data: unitsData } = await supabase.from("units").select("id, name, short_name");
+  const unitMap = new Map((unitsData || []).map((u) => [u.id, u.short_name || u.name]));
+  let itemsQuery = supabase.from("items").select("id, name, name_en, name_ru, hash, price, category, type, disable, tenant_id").eq("tenant_id", tenant.id);
+  if (!options.includeDisabled) {
+    itemsQuery = itemsQuery.eq("disable", 0);
+  }
+  if (options.type && options.type !== "all") {
+    if (options.type === "kitchen") {
+      itemsQuery = itemsQuery.in("type", ["restourant", "kitchen"]);
+    } else {
+      itemsQuery = itemsQuery.eq("type", options.type);
+    }
+  }
+  if (options.search) {
+    const q = options.search.trim();
+    itemsQuery = itemsQuery.or(`name.ilike.%${q}%,name_en.ilike.%${q}%,name_ru.ilike.%${q}%`);
+  }
+  const { data: itemsData, error: itemsErr } = await itemsQuery;
+  if (itemsErr) throw itemsErr;
+  const items = itemsData || [];
+  if (items.length === 0) {
+    return {
+      tenant: { id: tenant.id, name: tenant.name, currency: tenant.currency || "GEL" },
+      summary: {
+        total_dishes_count: 0,
+        dishes_with_recipe: 0,
+        dishes_without_recipe: 0,
+        average_food_cost_pct: 0,
+        average_selling_price: 0,
+        average_cost_price: 0,
+        average_margin: 0,
+        high_food_cost_count: 0
+      },
+      dishes: []
+    };
+  }
+  const needRows = await fetchAllRows(async (from, to) => {
+    return supabase.from("need").select("id, hash, item, count, dish_hash, dish_id, item_type").eq("tenant_id", tenant.id).range(from, to);
+  });
+  const needMap = /* @__PURE__ */ new Map();
+  needRows.forEach((n) => {
+    if (!n.hash) return;
+    const list = needMap.get(n.hash) || [];
+    list.push(n);
+    needMap.set(n.hash, list);
+  });
+  const prodIds = [...new Set(needRows.map((n) => n.item).filter(Boolean))];
+  const { data: productsData } = prodIds.length > 0 ? await supabase.from("products").select("id, name, price, ert, count, type").in("id", prodIds) : { data: [] };
+  const prodMap = /* @__PURE__ */ new Map();
+  (productsData || []).forEach((p) => prodMap.set(p.id, p));
+  const { data: semiData } = await supabase.from("semi_finished_products").select("id, product_id, target_weight, total_cost").eq("tenant_id", tenant.id);
+  const semiMap = /* @__PURE__ */ new Map();
+  (semiData || []).forEach((s) => {
+    if (s.product_id) semiMap.set(s.product_id, s);
+  });
+  prodMap.forEach((prod, id) => {
+    const sf = semiMap.get(id);
+    if (sf) {
+      const tw = parseFloat(sf.target_weight) || 1;
+      const tc = parseFloat(sf.total_cost) || 0;
+      if (tw > 0 && tc > 0) {
+        prod.price = tc / tw;
+      }
+    }
+  });
+  const calculatedDishes = [];
+  let sumFoodCostPct = 0;
+  let dishesWithRecipeCount = 0;
+  let totalSellingPrice = 0;
+  let totalCostPrice = 0;
+  let highFoodCostCount = 0;
+  for (const item of items) {
+    const itemNeeds = needMap.get(item.hash) || [];
+    const hasRecipe = itemNeeds.length > 0;
+    let costPrice = 0;
+    itemNeeds.forEach((n) => {
+      const prod = prodMap.get(n.item);
+      const qty = parseFloat(n.count) || 0;
+      const unitCost = Math.max(0, parseFloat(prod?.price) || 0);
+      costPrice += qty * unitCost;
+    });
+    const sellPrice = parseFloat(item.price) || 0;
+    const margin = sellPrice - costPrice;
+    const foodCostPct = sellPrice > 0 ? costPrice / sellPrice * 100 : 0;
+    const markupPct = costPrice > 0 ? (sellPrice - costPrice) / costPrice * 100 : 0;
+    let catName = "\u10D9\u10D0\u10E2\u10D4\u10D2\u10DD\u10E0\u10D8\u10D8\u10E1 \u10D2\u10D0\u10E0\u10D4\u10E8\u10D4";
+    if (item.category) {
+      const cleaned = item.category.replace(/,/g, "").trim();
+      catName = categoryMap.get(cleaned) || categoryMap.get(item.category) || `\u10D9\u10D0\u10E2\u10D4\u10D2\u10DD\u10E0\u10D8\u10D0 #${cleaned}`;
+    }
+    if (hasRecipe) {
+      dishesWithRecipeCount += 1;
+      sumFoodCostPct += foodCostPct;
+      totalSellingPrice += sellPrice;
+      totalCostPrice += costPrice;
+      if (foodCostPct > 35) {
+        highFoodCostCount += 1;
+      }
+    }
+    calculatedDishes.push({
+      item_id: item.id,
+      name: item.name,
+      name_en: item.name_en,
+      name_ru: item.name_ru,
+      hash: item.hash,
+      category_name: catName,
+      type: item.type === "bar" ? "\u10D1\u10D0\u10E0\u10D8" : item.type === "hookah" ? "\u10F0\u10E3\u10D9\u10D0" : "\u10E1\u10D0\u10DB\u10D6\u10D0\u10E0\u10D4\u10E3\u10DA\u10DD",
+      selling_price: Number(sellPrice.toFixed(2)),
+      cost_price: Number(costPrice.toFixed(2)),
+      gross_margin: Number(margin.toFixed(2)),
+      food_cost_pct: Number(foodCostPct.toFixed(1)),
+      markup_pct: Number(markupPct.toFixed(1)),
+      ingredients_count: itemNeeds.length,
+      has_recipe: hasRecipe,
+      is_disabled: Boolean(item.disable)
+    });
+  }
+  let filtered = calculatedDishes;
+  if (options.missingRecipesOnly) {
+    filtered = filtered.filter((d) => !d.has_recipe);
+  }
+  if (options.minFoodCost !== void 0) {
+    filtered = filtered.filter((d) => d.food_cost_pct >= options.minFoodCost);
+  }
+  if (options.maxFoodCost !== void 0) {
+    filtered = filtered.filter((d) => d.food_cost_pct <= options.maxFoodCost);
+  }
+  if (options.category) {
+    const cLow = options.category.toLowerCase();
+    filtered = filtered.filter((d) => d.category_name.toLowerCase().includes(cLow));
+  }
+  filtered.sort((a, b) => {
+    let valA = a[sortBy];
+    let valB = b[sortBy];
+    if (typeof valA === "string") {
+      return sortDirection === "asc" ? valA.localeCompare(valB) : valB.localeCompare(valA);
+    }
+    return sortDirection === "asc" ? valA - valB : valB - valA;
+  });
+  const avgFoodCost = dishesWithRecipeCount > 0 ? sumFoodCostPct / dishesWithRecipeCount : 0;
+  const avgSelling = items.length > 0 ? totalSellingPrice / items.length : 0;
+  const avgCost = dishesWithRecipeCount > 0 ? totalCostPrice / dishesWithRecipeCount : 0;
+  return {
+    tenant: {
+      id: tenant.id,
+      name: tenant.name,
+      currency: tenant.currency || "GEL"
+    },
+    summary: {
+      total_dishes_count: items.length,
+      dishes_with_recipe: dishesWithRecipeCount,
+      dishes_without_recipe: items.length - dishesWithRecipeCount,
+      average_food_cost_pct: Number(avgFoodCost.toFixed(1)),
+      average_selling_price: Number(avgSelling.toFixed(2)),
+      average_cost_price: Number(avgCost.toFixed(2)),
+      average_margin: Number((avgSelling - avgCost).toFixed(2)),
+      high_food_cost_count: highFoodCostCount
+    },
+    dishes: filtered.slice(0, limit)
+  };
+}
+async function getDishRecipeDetails(itemIdOrNameOrHash, tenantIdentifier) {
+  const tenant = await resolveTenant(tenantIdentifier);
+  let itemQuery = supabase.from("items").select("id, name, name_en, name_ru, hash, price, category, type, disable, tenant_id").eq("tenant_id", tenant.id);
+  const queryStr = String(itemIdOrNameOrHash).trim();
+  if (/^\d+$/.test(queryStr) && queryStr.length < 8) {
+    itemQuery = itemQuery.or(`id.eq.${queryStr},name.ilike.%${queryStr}%`);
+  } else if (/^[a-f0-9]{32}$/i.test(queryStr)) {
+    itemQuery = itemQuery.eq("hash", queryStr);
+  } else {
+    itemQuery = itemQuery.ilike("name", `%${queryStr}%`);
+  }
+  const { data: itemData, error: itemErr } = await itemQuery.limit(1).maybeSingle();
+  if (itemErr) throw itemErr;
+  if (!itemData) {
+    throw new Error(`\u10D9\u10D4\u10E0\u10EB\u10D8 \u10DE\u10D0\u10E0\u10D0\u10DB\u10D4\u10E2\u10E0\u10D8\u10D7 "${itemIdOrNameOrHash}" \u10D5\u10D4\u10E0 \u10DB\u10DD\u10D8\u10EB\u10D4\u10D1\u10DC\u10D0.`);
+  }
+  const item = itemData;
+  let categoryName = "\u10D9\u10D0\u10E2\u10D4\u10D2\u10DD\u10E0\u10D8\u10D8\u10E1 \u10D2\u10D0\u10E0\u10D4\u10E8\u10D4";
+  if (item.category) {
+    const cleaned = item.category.replace(/,/g, "").trim();
+    const { data: cat } = await supabase.from("categories").select("name").eq("id", cleaned).maybeSingle();
+    if (cat?.name) categoryName = cat.name;
+  }
+  const { data: unitsData } = await supabase.from("units").select("id, name, short_name");
+  const unitMap = new Map((unitsData || []).map((u) => [u.id, u.short_name || u.name]));
+  const { data: needList, error: needErr } = await supabase.from("need").select("id, hash, item, count, dish_hash, dish_id, item_type").eq("tenant_id", tenant.id).eq("hash", item.hash);
+  if (needErr) throw needErr;
+  const productIds = (needList || []).map((n) => n.item).filter(Boolean);
+  const { data: productsData } = productIds.length > 0 ? await supabase.from("products").select("id, name, price, ert, count, type").in("id", productIds) : { data: [] };
+  const prodMap = new Map((productsData || []).map((p) => [p.id, p]));
+  const { data: semiData } = await supabase.from("semi_finished_products").select("id, product_id, target_weight, total_cost").eq("tenant_id", tenant.id).in("product_id", productIds);
+  const semiMap = new Map((semiData || []).map((s) => [s.product_id, s]));
+  let totalPrimeCost = 0;
+  const rawIngredients = [];
+  for (const need of needList || []) {
+    const prod = prodMap.get(need.item);
+    const sf = semiMap.get(need.item);
+    const qty = parseFloat(need.count) || 0;
+    let unitCost = Math.max(0, parseFloat(prod?.price) || 0);
+    let isSemi = false;
+    if (sf) {
+      isSemi = true;
+      const tw = parseFloat(sf.target_weight) || 1;
+      const tc = parseFloat(sf.total_cost) || 0;
+      if (tw > 0 && tc > 0) {
+        unitCost = tc / tw;
+      }
+    }
+    const lineCost = qty * unitCost;
+    totalPrimeCost += lineCost;
+    rawIngredients.push({
+      product_id: need.item,
+      product_name: prod?.name || `\u10DE\u10E0\u10DD\u10D3\u10E3\u10E5\u10E2\u10D8 #${need.item}`,
+      unit_name: prod ? unitMap.get(prod.ert) || "\u10EA" : "\u10EA",
+      quantity: Number(qty.toFixed(4)),
+      unit_cost_price: Number(unitCost.toFixed(3)),
+      line_total_cost: Number(lineCost.toFixed(3)),
+      is_semi_finished: isSemi
+    });
+  }
+  const ingredients = rawIngredients.map((ing) => ({
+    ...ing,
+    cost_share_pct: totalPrimeCost > 0 ? Number((ing.line_total_cost / totalPrimeCost * 100).toFixed(1)) : 0
+  })).sort((a, b) => b.line_total_cost - a.line_total_cost);
+  const sellPrice = parseFloat(item.price) || 0;
+  const margin = sellPrice - totalPrimeCost;
+  const foodCostPct = sellPrice > 0 ? totalPrimeCost / sellPrice * 100 : 0;
+  const markupPct = totalPrimeCost > 0 ? (sellPrice - totalPrimeCost) / totalPrimeCost * 100 : 0;
+  return {
+    tenant_name: tenant.name,
+    item: {
+      id: item.id,
+      name: item.name,
+      name_en: item.name_en,
+      name_ru: item.name_ru,
+      hash: item.hash,
+      category_name: categoryName,
+      type: item.type === "bar" ? "\u10D1\u10D0\u10E0\u10D8" : item.type === "hookah" ? "\u10F0\u10E3\u10D9\u10D0" : "\u10E1\u10D0\u10DB\u10D6\u10D0\u10E0\u10D4\u10E3\u10DA\u10DD",
+      selling_price: Number(sellPrice.toFixed(2)),
+      prime_cost: Number(totalPrimeCost.toFixed(2)),
+      gross_margin: Number(margin.toFixed(2)),
+      food_cost_pct: Number(foodCostPct.toFixed(1)),
+      markup_pct: Number(markupPct.toFixed(1)),
+      ingredients_count: ingredients.length,
+      has_recipe: ingredients.length > 0,
+      currency: tenant.currency || "GEL"
+    },
+    ingredients
+  };
+}
+async function getSemiFinishedAnalytics(tenantIdentifier, search) {
+  const tenant = await resolveTenant(tenantIdentifier);
+  let query = supabase.from("semi_finished_products").select("id, name, unit, target_weight, total_cost, created_at, updated_at, product_id, tenant_id").eq("tenant_id", tenant.id);
+  if (search) {
+    query = query.ilike("name", `%${search.trim()}%`);
+  }
+  const { data: semiList, error: semiErr } = await query.order("name", { ascending: true });
+  if (semiErr) throw semiErr;
+  const semiIds = (semiList || []).map((s) => s.id);
+  const { data: unitsData } = await supabase.from("units").select("id, name, short_name");
+  const unitMap = new Map((unitsData || []).map((u) => [u.id, u.short_name || u.name]));
+  const { data: ingrData } = semiIds.length > 0 ? await supabase.from("semi_finished_ingredients").select("*").in("semi_finished_id", semiIds) : { data: [] };
+  const prodIds = [...new Set((ingrData || []).map((i) => i.product_id).filter(Boolean))];
+  const { data: prodsData } = prodIds.length > 0 ? await supabase.from("products").select("id, name, ert").in("id", prodIds) : { data: [] };
+  const prodMap = new Map((prodsData || []).map((p) => [p.id, p]));
+  const ingrMap = /* @__PURE__ */ new Map();
+  (ingrData || []).forEach((i) => {
+    const list = ingrMap.get(i.semi_finished_id) || [];
+    list.push(i);
+    ingrMap.set(i.semi_finished_id, list);
+  });
+  const result = (semiList || []).map((s) => {
+    const tw = parseFloat(s.target_weight) || 1;
+    const tc = parseFloat(s.total_cost) || 0;
+    const unitCost = tw > 0 ? tc / tw : 0;
+    const unitName = unitMap.get(s.unit) || "\u10D9\u10D2";
+    const ingredients = (ingrMap.get(s.id) || []).map((ing) => {
+      const p = prodMap.get(ing.product_id);
+      return {
+        product_id: ing.product_id,
+        product_name: p?.name || `\u10DE\u10E0\u10DD\u10D3\u10E3\u10E5\u10E2\u10D8 #${ing.product_id}`,
+        unit_name: p ? unitMap.get(p.ert) || "\u10EA" : "\u10EA",
+        quantity: parseFloat(ing.quantity) || 0,
+        unit_price: parseFloat(ing.unit_price) || 0,
+        total_cost: parseFloat(ing.total_cost) || 0
+      };
+    });
+    return {
+      id: s.id,
+      name: s.name,
+      product_id: s.product_id,
+      yield_target_weight: tw,
+      unit_name: unitName,
+      batch_total_cost: Number(tc.toFixed(2)),
+      calculated_cost_per_unit: Number(unitCost.toFixed(2)),
+      ingredients_count: ingredients.length,
+      ingredients
+    };
+  });
+  return {
+    tenant_name: tenant.name,
+    total_semi_finished_count: result.length,
+    items: result
+  };
+}
+
 // src/tools.ts
 function registerTools(server2) {
   server2.tool(
@@ -1771,6 +2558,415 @@ ${posText || "  \u2022 POS \u10DB\u10D8\u10E2\u10D0\u10DC\u10D8\u10E1 \u10E8\u10
       }
     }
   );
+  server2.tool(
+    "get_purchases_analytics",
+    "\u10E8\u10D4\u10E1\u10E7\u10D8\u10D3\u10D5\u10D4\u10D1\u10D8\u10E1\u10D0 \u10D3\u10D0 \u10DB\u10D8\u10E6\u10D4\u10D1\u10D4\u10D1\u10D8\u10E1 \u10E1\u10E0\u10E3\u10DA\u10D8 \u10D0\u10DC\u10D0\u10DA\u10D8\u10E2\u10D8\u10D9\u10D0: \u10EF\u10D0\u10DB\u10E3\u10E0\u10D8 \u10E8\u10D4\u10E1\u10E7\u10D8\u10D3\u10D5\u10D4\u10D1\u10D8, \u10DB\u10DD\u10DB\u10EC\u10DD\u10D3\u10D4\u10D1\u10DA\u10D4\u10D1\u10D8, \u10E1\u10D0\u10EC\u10E7\u10DD\u10D1\u10D4\u10D1\u10D8 \u10D3\u10D0 \u10E2\u10DD\u10DE \u10E8\u10D4\u10E1\u10E7\u10D8\u10D3\u10E3\u10DA\u10D8 \u10DE\u10E0\u10DD\u10D3\u10E3\u10E5\u10E2\u10D4\u10D1\u10D8 (Purchases and procurement analytics by period, suppliers, warehouses, top products)",
+    {
+      tenant: z.string().optional().describe("Tenant ID \u10D0\u10DC Slug"),
+      period: z.enum(["today", "yesterday", "this_week", "this_month", "last_month", "custom"]).default("this_month").describe("\u10E1\u10D0\u10D0\u10DC\u10D2\u10D0\u10E0\u10D8\u10E8\u10DD \u10DE\u10D4\u10E0\u10D8\u10DD\u10D3\u10D8"),
+      startDate: z.string().optional().describe("\u10E1\u10D0\u10EC\u10E7\u10D8\u10E1\u10D8 \u10D7\u10D0\u10E0\u10D8\u10E6\u10D8 YYYY-MM-DD (\u10D7\u10E3 period=custom)"),
+      endDate: z.string().optional().describe("\u10E1\u10D0\u10D1\u10DD\u10DA\u10DD\u10DD \u10D7\u10D0\u10E0\u10D8\u10E6\u10D8 YYYY-MM-DD (\u10D7\u10E3 period=custom)"),
+      supplierId: z.union([z.string(), z.number()]).optional().describe("\u10E4\u10D8\u10DA\u10E2\u10E0\u10D8 \u10D9\u10DD\u10DC\u10D9\u10E0\u10D4\u10E2\u10E3\u10DA \u10DB\u10DD\u10DB\u10EC\u10DD\u10D3\u10D4\u10D1\u10D4\u10DA\u10D6\u10D4"),
+      warehouse: z.string().optional().describe("\u10E1\u10D0\u10EC\u10E7\u10DD\u10D1\u10D8 (bar, kitchen, main, ALL)")
+    },
+    async ({ tenant, period, startDate, endDate, supplierId, warehouse }) => {
+      try {
+        const res = await getPurchasesAnalytics(tenant, period, startDate, endDate, supplierId, warehouse);
+        const cur = res.tenant.currency;
+        const supText = res.suppliers_summary.slice(0, 8).map(
+          (s, idx) => `  ${idx + 1}. ${s.supplier_name} \u2014 ${s.total_amount} ${cur} (${s.invoices_count} \u10D6\u10D4\u10D3\u10DC\u10D0\u10D3\u10D4\u10D1\u10D8, ${s.items_count} \u10DE\u10DD\u10D6\u10D8\u10EA\u10D8\u10D0)`
+        ).join("\n");
+        const whText = res.warehouse_breakdown.map(
+          (w) => `  \u2022 ${w.warehouse_name}: ${w.total_amount} ${cur} (${w.items_count} \u10DE\u10DD\u10D6\u10D8\u10EA\u10D8\u10D0)`
+        ).join("\n");
+        const topProdsText = res.top_purchased_products.slice(0, 10).map(
+          (p, idx) => `  ${idx + 1}. ${p.product_name} \u2014 ${p.total_amount} ${cur} (${p.total_quantity} ${p.unit_name}, \u10E1\u10D0\u10E8. \u10E4\u10D0\u10E1\u10D8: ${p.average_unit_price} ${cur})`
+        ).join("\n");
+        const summaryText = `
+\u{1F69A} **\u10E8\u10D4\u10E1\u10E7\u10D8\u10D3\u10D5\u10D4\u10D1\u10D8\u10E1 \u10D0\u10DC\u10D0\u10DA\u10D8\u10E2\u10D8\u10D9\u10D0 \u2014 ${res.tenant.name} (${res.period_label})**
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+\u{1F4B0} **\u10EF\u10D0\u10DB\u10E3\u10E0\u10D8 \u10E8\u10D4\u10E1\u10E7\u10D8\u10D3\u10D5\u10D4\u10D1\u10D8:** ${res.summary.total_purchase_amount} ${cur}
+\u{1F4D1} **\u10D6\u10D4\u10D3\u10DC\u10D0\u10D3\u10D4\u10D1\u10D4\u10D1\u10D8\u10E1 \u10E0\u10D0\u10DD\u10D3\u10D4\u10DC\u10DD\u10D1\u10D0:** ${res.summary.total_invoices_count} (\u10E1\u10D0\u10E8\u10E3\u10D0\u10DA\u10DD \u10D6\u10D4\u10D3\u10DC\u10D0\u10D3\u10D4\u10D1\u10D8: ${res.summary.average_invoice_amount} ${cur})
+\u{1F4E6} **\u10E8\u10D4\u10E1\u10E7\u10D8\u10D3\u10E3\u10DA\u10D8 \u10DE\u10DD\u10D6\u10D8\u10EA\u10D8\u10D4\u10D1\u10D8:** ${res.summary.total_items_count} \u10E9\u10D0\u10DC\u10D0\u10EC\u10D4\u10E0\u10D8
+
+\u{1F3DB}\uFE0F **\u10D2\u10D0\u10DC\u10D0\u10EC\u10D8\u10DA\u10D4\u10D1\u10D0 \u10E1\u10D0\u10EC\u10E7\u10DD\u10D1\u10D4\u10D1\u10D8\u10E1 \u10DB\u10D8\u10EE\u10D4\u10D3\u10D5\u10D8\u10D7:**
+${whText || "  \u2022 \u10DB\u10DD\u10DC\u10D0\u10EA\u10D4\u10DB\u10D4\u10D1\u10D8 \u10D0\u10E0 \u10D0\u10E0\u10D8\u10E1"}
+
+\u{1F69A} **\u10E2\u10DD\u10DE \u10DB\u10DD\u10DB\u10EC\u10DD\u10D3\u10D4\u10D1\u10DA\u10D4\u10D1\u10D8:**
+${supText || "  \u2022 \u10DB\u10DD\u10DB\u10EC\u10DD\u10D3\u10D4\u10D1\u10DA\u10D4\u10D1\u10D8 \u10D0\u10E0 \u10E4\u10D8\u10E5\u10E1\u10D8\u10E0\u10D3\u10D4\u10D1\u10D0"}
+
+\u{1F51D} **\u10E2\u10DD\u10DE \u10E8\u10D4\u10E1\u10E7\u10D8\u10D3\u10E3\u10DA\u10D8 \u10DE\u10E0\u10DD\u10D3\u10E3\u10E5\u10E2\u10D4\u10D1\u10D8:**
+${topProdsText || "  \u2022 \u10DE\u10E0\u10DD\u10D3\u10E3\u10E5\u10E2\u10D4\u10D1\u10D8 \u10D0\u10E0 \u10E4\u10D8\u10E5\u10E1\u10D8\u10E0\u10D3\u10D4\u10D1\u10D0"}
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+`;
+        return {
+          content: [{ type: "text", text: summaryText.trim() + "\n\n" + JSON.stringify(res, null, 2) }]
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `\u10E8\u10D4\u10EA\u10D3\u10DD\u10DB\u10D0 \u10E8\u10D4\u10E1\u10E7\u10D8\u10D3\u10D5\u10D4\u10D1\u10D8\u10E1 \u10D0\u10DC\u10D0\u10DA\u10D8\u10D6\u10D8\u10E1\u10D0\u10E1: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+  server2.tool(
+    "search_purchases",
+    "\u10E8\u10D4\u10E1\u10E7\u10D8\u10D3\u10D5\u10D4\u10D1\u10D8\u10E1/\u10D6\u10D4\u10D3\u10DC\u10D0\u10D3\u10D4\u10D1\u10D4\u10D1\u10D8\u10E1 \u10EB\u10D4\u10D1\u10DC\u10D0 \u10D3\u10D0 \u10E4\u10D8\u10DA\u10E2\u10E0\u10D0\u10EA\u10D8\u10D0: \u10D6\u10D4\u10D3\u10DC\u10D0\u10D3\u10D4\u10D1\u10D8\u10E1 \u10DC\u10DD\u10DB\u10E0\u10D8\u10D7, \u10DE\u10E0\u10DD\u10D3\u10E3\u10E5\u10E2\u10D8\u10E1 \u10E1\u10D0\u10EE\u10D4\u10DA\u10D8\u10D7 \u10D0\u10DC \u10DB\u10DD\u10DB\u10EC\u10DD\u10D3\u10D4\u10D1\u10DA\u10D8\u10D7 (Search purchases and invoices by waybill code, product name, supplier)",
+    {
+      tenant: z.string().optional().describe("Tenant ID \u10D0\u10DC Slug"),
+      query: z.string().optional().describe("\u10E1\u10D0\u10EB\u10D8\u10D4\u10D1\u10DD \u10E2\u10D4\u10E5\u10E1\u10E2\u10D8 (\u10D6\u10D4\u10D3\u10DC\u10D0\u10D3\u10D4\u10D1\u10D8\u10E1 \u10DC\u10DD\u10DB\u10D4\u10E0\u10D8 \u10D0\u10DC \u10DE\u10E0\u10DD\u10D3\u10E3\u10E5\u10E2\u10D8\u10E1 \u10E1\u10D0\u10EE\u10D4\u10DA\u10D8)"),
+      supplierId: z.union([z.string(), z.number()]).optional().describe("\u10DB\u10DD\u10DB\u10EC\u10DD\u10D3\u10D4\u10D1\u10DA\u10D8\u10E1 ID"),
+      warehouse: z.string().optional().describe("\u10E1\u10D0\u10EC\u10E7\u10DD\u10D1\u10D8 (bar, kitchen, main, ALL)"),
+      period: z.enum(["today", "yesterday", "this_week", "this_month", "last_month", "custom"]).optional(),
+      startDate: z.string().optional().describe("YYYY-MM-DD"),
+      endDate: z.string().optional().describe("YYYY-MM-DD"),
+      limit: z.number().default(25).describe("\u10DB\u10D0\u10E5\u10E1\u10D8\u10DB\u10D0\u10DA\u10E3\u10E0\u10D8 \u10E0\u10D0\u10DD\u10D3\u10D4\u10DC\u10DD\u10D1\u10D0")
+    },
+    async ({ tenant, query, supplierId, warehouse, period, startDate, endDate, limit }) => {
+      try {
+        const res = await searchPurchases(tenant, {
+          query,
+          supplierId,
+          warehouse,
+          period,
+          startDate,
+          endDate,
+          limit
+        });
+        const listText = res.items.map(
+          (it) => `\u2022 [\u10D6\u10D4\u10D3\u10DC\u10D0\u10D3\u10D4\u10D1\u10D8: ${it.invoice_code}] ${it.product_name} \u2014 ${it.quantity} ${it.unit_name} x ${it.unit_price} GEL = ${it.total_price} GEL | \u10DB\u10DD\u10DB\u10EC\u10DD\u10D3\u10D4\u10D1\u10D4\u10DA\u10D8: ${it.supplier_name} | \u10D7\u10D0\u10E0\u10D8\u10E6\u10D8: ${new Date(it.date).toLocaleDateString("ka-GE")}`
+        ).join("\n");
+        const summaryText = `
+\u{1F50D} **\u10E8\u10D4\u10E1\u10E7\u10D8\u10D3\u10D5\u10D4\u10D1\u10D8\u10E1 \u10EB\u10D4\u10D1\u10DC\u10D8\u10E1 \u10E8\u10D4\u10D3\u10D4\u10D2\u10D4\u10D1\u10D8 \u2014 ${res.tenant_name}**
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+\u10E1\u10E3\u10DA \u10DB\u10DD\u10D8\u10EB\u10D4\u10D1\u10DC\u10D0: ${res.total_found} \u10E9\u10D0\u10DC\u10D0\u10EC\u10D4\u10E0\u10D8
+
+${listText || "\u10E9\u10D0\u10DC\u10D0\u10EC\u10D4\u10E0\u10D4\u10D1\u10D8 \u10DB\u10DD\u10EA\u10D4\u10DB\u10E3\u10DA\u10D8 \u10DE\u10D0\u10E0\u10D0\u10DB\u10D4\u10E2\u10E0\u10D4\u10D1\u10D8\u10D7 \u10D5\u10D4\u10E0 \u10DB\u10DD\u10D8\u10EB\u10D4\u10D1\u10DC\u10D0."}
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+`;
+        return {
+          content: [{ type: "text", text: summaryText.trim() + "\n\n" + JSON.stringify(res, null, 2) }]
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `\u10E8\u10D4\u10EA\u10D3\u10DD\u10DB\u10D0 \u10E8\u10D4\u10E1\u10E7\u10D8\u10D3\u10D5\u10D4\u10D1\u10D8\u10E1 \u10EB\u10D4\u10D1\u10DC\u10D8\u10E1\u10D0\u10E1: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+  server2.tool(
+    "get_purchase_details",
+    "\u10D9\u10DD\u10DC\u10D9\u10E0\u10D4\u10E2\u10E3\u10DA\u10D8 \u10D6\u10D4\u10D3\u10DC\u10D0\u10D3\u10D4\u10D1\u10D8\u10E1/\u10E8\u10D4\u10E1\u10E7\u10D8\u10D3\u10D5\u10D8\u10E1 \u10E1\u10E0\u10E3\u10DA\u10D8 \u10E8\u10D4\u10DB\u10D0\u10D3\u10D2\u10D4\u10DC\u10DA\u10DD\u10D1\u10D0: \u10DE\u10E0\u10DD\u10D3\u10E3\u10E5\u10E2\u10D4\u10D1\u10D8, \u10E0\u10D0\u10DD\u10D3\u10D4\u10DC\u10DD\u10D1\u10D4\u10D1\u10D8, \u10E8\u10D4\u10E1\u10D0\u10E1\u10E7\u10D8\u10D3\u10D8 \u10E4\u10D0\u10E1\u10D4\u10D1\u10D8 \u10D3\u10D0 \u10DB\u10DD\u10DB\u10EC\u10DD\u10D3\u10D4\u10D1\u10D4\u10DA\u10D8 (Detailed invoice line items breakdown, quantities, purchase prices, supplier info)",
+    {
+      invoiceCode: z.union([z.string(), z.number()]).describe("\u10D6\u10D4\u10D3\u10DC\u10D0\u10D3\u10D4\u10D1\u10D8\u10E1 \u10DC\u10DD\u10DB\u10D4\u10E0\u10D8 (Code) \u10D0\u10DC \u10E8\u10D4\u10E1\u10E7\u10D8\u10D3\u10D5\u10D8\u10E1 ID"),
+      tenant: z.string().optional().describe("Tenant ID \u10D0\u10DC Slug")
+    },
+    async ({ invoiceCode, tenant }) => {
+      try {
+        const res = await getPurchaseDetails(invoiceCode, tenant);
+        const itemsText = res.items.map(
+          (it, idx) => `  ${idx + 1}. ${it.product_name} \u2014 ${it.quantity} ${it.unit_name} x ${it.unit_price} GEL = ${it.total_price} GEL`
+        ).join("\n");
+        const summaryText = `
+\u{1F4D1} **\u10D6\u10D4\u10D3\u10DC\u10D0\u10D3\u10D4\u10D1\u10D8\u10E1 \u10D3\u10D4\u10E2\u10D0\u10DA\u10D4\u10D1\u10D8: #${res.invoice_code} (${res.tenant_name})**
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+\u{1F4C5} \u10D7\u10D0\u10E0\u10D8\u10E6\u10D8: ${new Date(res.date).toLocaleString("ka-GE")}
+\u{1F3E2} \u10E1\u10D0\u10EC\u10E7\u10DD\u10D1\u10D8: ${res.warehouse_type}
+\u{1F69A} \u10DB\u10DD\u10DB\u10EC\u10DD\u10D3\u10D4\u10D1\u10D4\u10DA\u10D8: ${res.supplier.name} ${res.supplier.code ? `(\u10E1/\u10D9: ${res.supplier.code})` : ""} ${res.supplier.contact ? `| \u10E2\u10D4\u10DA: ${res.supplier.contact}` : ""}
+
+\u{1F4E6} **\u10DE\u10DD\u10D6\u10D8\u10EA\u10D8\u10D4\u10D1\u10D8\u10E1 \u10E1\u10D8\u10D0 (${res.total_items_count}):**
+${itemsText || "  \u2022 \u10DE\u10DD\u10D6\u10D8\u10EA\u10D8\u10D4\u10D1\u10D8 \u10D0\u10E0 \u10D0\u10E0\u10D8\u10E1"}
+
+\u{1F4B0} **\u10E1\u10E3\u10DA \u10D6\u10D4\u10D3\u10DC\u10D0\u10D3\u10D4\u10D1\u10D8\u10E1 \u10EF\u10D0\u10DB\u10D8:** ${res.grand_total} ${res.currency}
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+`;
+        return {
+          content: [{ type: "text", text: summaryText.trim() + "\n\n" + JSON.stringify(res, null, 2) }]
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `\u10E8\u10D4\u10EA\u10D3\u10DD\u10DB\u10D0 \u10D6\u10D4\u10D3\u10DC\u10D0\u10D3\u10D4\u10D1\u10D8\u10E1 \u10D3\u10D4\u10E2\u10D0\u10DA\u10D4\u10D1\u10D8\u10E1 \u10DB\u10D8\u10E6\u10D4\u10D1\u10D8\u10E1\u10D0\u10E1: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+  server2.tool(
+    "get_inventory_acts",
+    "\u10D8\u10DC\u10D5\u10D4\u10DC\u10E2\u10D0\u10E0\u10D8\u10D6\u10D0\u10EA\u10D8\u10D8\u10E1 \u10D0\u10E5\u10E2\u10D4\u10D1\u10D8\u10E1 \u10E1\u10D8\u10D0, \u10D3\u10D0\u10DC\u10D0\u10D9\u10DA\u10D8\u10E1\u10D4\u10D1\u10D8 \u10D3\u10D0 \u10D6\u10D4\u10D3\u10DB\u10D4\u10E2\u10DD\u10D1\u10D4\u10D1\u10D8 (Inventory audit acts history: shortages, surpluses, net balance, date, warehouse)",
+    {
+      tenant: z.string().optional().describe("Tenant ID \u10D0\u10DC Slug"),
+      period: z.enum(["all", "today", "yesterday", "this_week", "this_month", "last_month", "custom"]).default("all").describe("\u10DE\u10D4\u10E0\u10D8\u10DD\u10D3\u10D8"),
+      startDate: z.string().optional().describe("YYYY-MM-DD"),
+      endDate: z.string().optional().describe("YYYY-MM-DD"),
+      warehouse: z.string().optional().describe("\u10E1\u10D0\u10EC\u10E7\u10DD\u10D1\u10D8 (bar, kitchen, restourant, storage, \u10E7\u10D5\u10D4\u10DA\u10D0)"),
+      status: z.enum(["all", "completed", "draft"]).default("all").describe("\u10E1\u10E2\u10D0\u10E2\u10E3\u10E1\u10D8"),
+      limit: z.number().default(25).describe("\u10DB\u10D0\u10E5\u10E1\u10D8\u10DB\u10D0\u10DA\u10E3\u10E0\u10D8 \u10E0\u10D0\u10DD\u10D3\u10D4\u10DC\u10DD\u10D1\u10D0")
+    },
+    async ({ tenant, period, startDate, endDate, warehouse, status, limit }) => {
+      try {
+        const res = await getInventoryActs(tenant, {
+          period,
+          startDate,
+          endDate,
+          warehouse,
+          status,
+          limit
+        });
+        const cur = res.tenant.currency;
+        const actsText = res.acts.map(
+          (a) => `\u2022 [\u10D0\u10E5\u10E2\u10D8 #${a.id}] ${new Date(a.date).toLocaleDateString("ka-GE")} | \u10E1\u10D0\u10EC\u10E7\u10DD\u10D1\u10D8: ${a.warehouse_type} | \u10E8\u10D4\u10DB\u10DD\u10EC\u10DB\u10D3\u10D0: ${a.total_items} \u10DE\u10E0\u10DD\u10D3\u10E3\u10E5\u10E2\u10D8
+  \u{1F53B} \u10D3\u10D0\u10DC\u10D0\u10D9\u10DA\u10D8\u10E1\u10D8: -${a.shortage_amount} ${cur} | \u{1F53A} \u10D6\u10D4\u10D3\u10DB\u10D4\u10E2\u10DD\u10D1\u10D0: +${a.surplus_amount} ${cur} | \u2696\uFE0F \u10E1\u10D0\u10DA\u10D3\u10DD: ${a.net_amount} ${cur} ${a.comment ? `(${a.comment})` : ""}`
+        ).join("\n\n");
+        const summaryText = `
+\u{1F4CB} **\u10D8\u10DC\u10D5\u10D4\u10DC\u10E2\u10D0\u10E0\u10D8\u10D6\u10D0\u10EA\u10D8\u10D8\u10E1 \u10D0\u10E5\u10E2\u10D4\u10D1\u10D8\u10E1 \u10E0\u10D4\u10D4\u10E1\u10E2\u10E0\u10D8 \u2014 ${res.tenant.name} ${res.period_label ? `(${res.period_label})` : ""}**
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+\u{1F4CA} \u10E1\u10E3\u10DA \u10E9\u10D0\u10E2\u10D0\u10E0\u10D4\u10D1\u10E3\u10DA\u10D8 \u10D8\u10DC\u10D5\u10D4\u10DC\u10E2\u10D0\u10E0\u10D8\u10D6\u10D0\u10EA\u10D8\u10D0: ${res.summary.total_acts_count}
+\u{1F4E6} \u10E8\u10D4\u10DB\u10DD\u10EC\u10DB\u10D4\u10D1\u10E3\u10DA\u10D8 \u10DE\u10DD\u10D6\u10D8\u10EA\u10D8\u10D4\u10D1\u10D8 \u10EF\u10D0\u10DB\u10E8\u10D8: ${res.summary.total_items_checked}
+\u{1F53B} \u10EF\u10D0\u10DB\u10E3\u10E0\u10D8 \u10D3\u10D0\u10DC\u10D0\u10D9\u10DA\u10D8\u10E1\u10D8: -${res.summary.total_shortage_amount} ${cur}
+\u{1F53A} \u10EF\u10D0\u10DB\u10E3\u10E0\u10D8 \u10D6\u10D4\u10D3\u10DB\u10D4\u10E2\u10DD\u10D1\u10D0: +${res.summary.total_surplus_amount} ${cur}
+\u2696\uFE0F \u10EC\u10DB\u10D8\u10DC\u10D3\u10D0 \u10E4\u10D8\u10DC\u10D0\u10DC\u10E1\u10E3\u10E0\u10D8 \u10E1\u10EE\u10D5\u10D0\u10DD\u10D1\u10D0: ${res.summary.total_net_discrepancy} ${cur}
+
+\u{1F4CB} **\u10D0\u10E5\u10E2\u10D4\u10D1\u10D8\u10E1 \u10E1\u10D8\u10D0:**
+${actsText || "\u10D8\u10DC\u10D5\u10D4\u10DC\u10E2\u10D0\u10E0\u10D8\u10D6\u10D0\u10EA\u10D8\u10D8\u10E1 \u10D0\u10E5\u10E2\u10D4\u10D1\u10D8 \u10D0\u10E0 \u10DB\u10DD\u10D8\u10EB\u10D4\u10D1\u10DC\u10D0."}
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+`;
+        return {
+          content: [{ type: "text", text: summaryText.trim() + "\n\n" + JSON.stringify(res, null, 2) }]
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `\u10E8\u10D4\u10EA\u10D3\u10DD\u10DB\u10D0 \u10D8\u10DC\u10D5\u10D4\u10DC\u10E2\u10D0\u10E0\u10D8\u10D6\u10D0\u10EA\u10D8\u10D4\u10D1\u10D8\u10E1 \u10DB\u10D8\u10E6\u10D4\u10D1\u10D8\u10E1\u10D0\u10E1: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+  server2.tool(
+    "get_inventory_act_details",
+    "\u10D9\u10DD\u10DC\u10D9\u10E0\u10D4\u10E2\u10E3\u10DA\u10D8 \u10D8\u10DC\u10D5\u10D4\u10DC\u10E2\u10D0\u10E0\u10D8\u10D6\u10D0\u10EA\u10D8\u10D8\u10E1 \u10D0\u10E5\u10E2\u10D8\u10E1 \u10E1\u10E0\u10E3\u10DA\u10D8 \u10D3\u10D4\u10E2\u10D0\u10DA\u10D4\u10D1\u10D8: \u10D0\u10E6\u10E0\u10D8\u10EA\u10EE\u10E3\u10DA\u10D8 vs \u10E4\u10D0\u10E5\u10E2\u10D8\u10E3\u10E0\u10D8 \u10DC\u10D0\u10E8\u10D7\u10D4\u10D1\u10D8, \u10E1\u10EE\u10D5\u10D0\u10DD\u10D1\u10D4\u10D1\u10D8 \u10D3\u10D0 \u10D3\u10D0\u10DC\u10D0\u10D9\u10DA\u10D8\u10E1\u10D4\u10D1\u10D8/\u10D6\u10D4\u10D3\u10DB\u10D4\u10E2\u10DD\u10D1\u10D4\u10D1\u10D8 (Detailed inventory audit breakdown: expected vs actual stock, discrepancies, top shortages and surpluses)",
+    {
+      actId: z.number().describe("\u10D8\u10DC\u10D5\u10D4\u10DC\u10E2\u10D0\u10E0\u10D8\u10D6\u10D0\u10EA\u10D8\u10D8\u10E1 \u10D0\u10E5\u10E2\u10D8\u10E1 ID"),
+      tenant: z.string().optional().describe("Tenant ID \u10D0\u10DC Slug")
+    },
+    async ({ actId, tenant }) => {
+      try {
+        const res = await getInventoryActDetails(actId, tenant);
+        const a = res.act;
+        const cur = a.currency;
+        const shortagesText = res.top_shortages.map(
+          (s, idx) => `  ${idx + 1}. \u{1F53B} ${s.product_name} \u2014 \u10E1\u10EE\u10D5\u10D0\u10DD\u10D1\u10D0: ${s.difference} ${s.unit_name} (\u10D0\u10E6\u10E0\u10D8\u10EA\u10EE\u10E3\u10DA\u10D8: ${s.expected_stock}, \u10E4\u10D0\u10E5\u10E2\u10D8\u10E3\u10E0\u10D8: ${s.actual_stock}) = ${s.diff_amount} ${cur}`
+        ).join("\n");
+        const surplusesText = res.top_surpluses.map(
+          (s, idx) => `  ${idx + 1}. \u{1F53A} ${s.product_name} \u2014 \u10E1\u10EE\u10D5\u10D0\u10DD\u10D1\u10D0: +${s.difference} ${s.unit_name} (\u10D0\u10E6\u10E0\u10D8\u10EA\u10EE\u10E3\u10DA\u10D8: ${s.expected_stock}, \u10E4\u10D0\u10E5\u10E2\u10D8\u10E3\u10E0\u10D8: ${s.actual_stock}) = +${s.diff_amount} ${cur}`
+        ).join("\n");
+        const summaryText = `
+\u{1F4D1} **\u10D8\u10DC\u10D5\u10D4\u10DC\u10E2\u10D0\u10E0\u10D8\u10D6\u10D0\u10EA\u10D8\u10D8\u10E1 \u10D0\u10E5\u10E2\u10D8 #${a.id} \u2014 ${res.tenant_name}**
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+\u{1F4C5} \u10D7\u10D0\u10E0\u10D8\u10E6\u10D8: ${new Date(a.created_at).toLocaleString("ka-GE")}
+\u{1F3DB}\uFE0F \u10E1\u10D0\u10EC\u10E7\u10DD\u10D1\u10D8: ${a.warehouse_type} | \u10E1\u10E2\u10D0\u10E2\u10E3\u10E1\u10D8: ${a.status} ${a.comment ? `| \u10D9\u10DD\u10DB\u10D4\u10DC\u10E2\u10D0\u10E0\u10D8: ${a.comment}` : ""}
+\u{1F464} \u10E8\u10D4\u10DB\u10E1\u10E0\u10E3\u10DA\u10D4\u10D1\u10D4\u10DA\u10D8: ${a.created_by_name}
+
+\u{1F4CA} **\u10E4\u10D8\u10DC\u10D0\u10DC\u10E1\u10E3\u10E0\u10D8 \u10E8\u10D4\u10D3\u10D4\u10D2\u10D8:**
+  \u2022 \u10E8\u10D4\u10DB\u10DD\u10EC\u10DB\u10D4\u10D1\u10E3\u10DA\u10D8 \u10DE\u10DD\u10D6\u10D8\u10EA\u10D8\u10D4\u10D1\u10D8: ${res.statistics.total_items_count} (\u10D6\u10E3\u10E1\u10E2\u10D8: ${res.statistics.exact_count}, \u10D3\u10D0\u10DC\u10D0\u10D9\u10DA\u10D8\u10E1\u10D8: ${res.statistics.shortages_count}, \u10D6\u10D4\u10D3\u10DB\u10D4\u10E2\u10DD\u10D1\u10D0: ${res.statistics.surpluses_count})
+  \u2022 \u{1F53B} \u10D3\u10D0\u10DC\u10D0\u10D9\u10DA\u10D8\u10E1\u10D8 \u10EF\u10D0\u10DB\u10E8\u10D8: -${a.shortage_amount} ${cur}
+  \u2022 \u{1F53A} \u10D6\u10D4\u10D3\u10DB\u10D4\u10E2\u10DD\u10D1\u10D0 \u10EF\u10D0\u10DB\u10E8\u10D8: +${a.surplus_amount} ${cur}
+  \u2022 \u2696\uFE0F **\u10EC\u10DB\u10D8\u10DC\u10D3\u10D0 \u10E1\u10D0\u10DA\u10D3\u10DD:** ${a.net_amount} ${cur}
+
+\u{1F53B} **\u10E3\u10D3\u10D8\u10D3\u10D4\u10E1\u10D8 \u10D3\u10D0\u10DC\u10D0\u10D9\u10DA\u10D8\u10E1\u10D4\u10D1\u10D8 (Top Shortages):**
+${shortagesText || "  \u2022 \u10D3\u10D0\u10DC\u10D0\u10D9\u10DA\u10D8\u10E1\u10D8 \u10D0\u10E0 \u10D0\u10E0\u10D8\u10E1 \u2705"}
+
+\u{1F53A} **\u10E3\u10D3\u10D8\u10D3\u10D4\u10E1\u10D8 \u10D6\u10D4\u10D3\u10DB\u10D4\u10E2\u10DD\u10D1\u10D4\u10D1\u10D8 (Top Surpluses):**
+${surplusesText || "  \u2022 \u10D6\u10D4\u10D3\u10DB\u10D4\u10E2\u10DD\u10D1\u10D0 \u10D0\u10E0 \u10D0\u10E0\u10D8\u10E1"}
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+`;
+        return {
+          content: [{ type: "text", text: summaryText.trim() + "\n\n" + JSON.stringify(res, null, 2) }]
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `\u10E8\u10D4\u10EA\u10D3\u10DD\u10DB\u10D0 \u10D0\u10E5\u10E2\u10D8\u10E1 \u10D3\u10D4\u10E2\u10D0\u10DA\u10D4\u10D1\u10D8\u10E1 \u10DB\u10D8\u10E6\u10D4\u10D1\u10D8\u10E1\u10D0\u10E1: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+  server2.tool(
+    "get_inventory_discrepancy_summary",
+    "\u10D8\u10DC\u10D5\u10D4\u10DC\u10E2\u10D0\u10E0\u10D8\u10D6\u10D0\u10EA\u10D8\u10D4\u10D1\u10D8\u10E1 \u10EF\u10D0\u10DB\u10E3\u10E0\u10D8 \u10D0\u10DC\u10D0\u10DA\u10D8\u10E2\u10D8\u10D9\u10D0: \u10E7\u10D5\u10D4\u10DA\u10D0\u10D6\u10D4 \u10DE\u10E0\u10DD\u10D1\u10DA\u10D4\u10DB\u10E3\u10E0\u10D8 \u10DE\u10E0\u10DD\u10D3\u10E3\u10E5\u10E2\u10D4\u10D1\u10D8 \u10EE\u10E8\u10D8\u10E0\u10D8 \u10D3\u10D0\u10DC\u10D0\u10D9\u10DA\u10D8\u10E1\u10D4\u10D1\u10D8\u10D7\u10D0 \u10D3\u10D0 \u10D6\u10D4\u10D3\u10DB\u10D4\u10E2\u10DD\u10D1\u10D4\u10D1\u10D8\u10D7 (Discrepancy summary across audits: most problematic products by shortage amounts)",
+    {
+      tenant: z.string().optional().describe("Tenant ID \u10D0\u10DC Slug"),
+      period: z.enum(["today", "yesterday", "this_week", "this_month", "last_month", "custom"]).default("this_month").describe("\u10DE\u10D4\u10E0\u10D8\u10DD\u10D3\u10D8"),
+      startDate: z.string().optional().describe("YYYY-MM-DD"),
+      endDate: z.string().optional().describe("YYYY-MM-DD")
+    },
+    async ({ tenant, period, startDate, endDate }) => {
+      try {
+        const res = await getInventoryDiscrepancySummary(tenant, period, startDate, endDate);
+        const cur = res.currency;
+        const probText = res.problematic_products.slice(0, 15).map(
+          (p, idx) => `  ${idx + 1}. \u26A0\uFE0F ${p.product_name} \u2014 \u10D3\u10D0\u10DC\u10D0\u10D9\u10DA\u10D8\u10E1\u10D8: -${p.total_shortage_amount} ${cur} (${p.total_shortage_qty} ${p.unit_name}) | \u10D6\u10D4\u10D3\u10DB\u10D4\u10E2\u10DD\u10D1\u10D0: +${p.total_surplus_amount} ${cur} | \u10EC\u10DB\u10D8\u10DC\u10D3\u10D0: ${p.net_diff_amount} ${cur} (${p.discrepancy_occurrences} \u10D0\u10E5\u10E2\u10E8\u10D8)`
+        ).join("\n");
+        const summaryText = `
+\u26A0\uFE0F **\u10D8\u10DC\u10D5\u10D4\u10DC\u10E2\u10D0\u10E0\u10D8\u10D6\u10D0\u10EA\u10D8\u10D8\u10E1 \u10D2\u10D0\u10D3\u10D0\u10EE\u10E0\u10D4\u10D1\u10D8\u10E1 \u10D0\u10DC\u10D0\u10DA\u10D8\u10D6\u10D8 \u2014 ${res.tenant_name} (${res.period_label})**
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+\u{1F4CA} \u10D2\u10D0\u10D0\u10DC\u10D0\u10DA\u10D8\u10D6\u10D4\u10D1\u10E3\u10DA\u10D8 \u10D0\u10E5\u10E2\u10D4\u10D1\u10D8: ${res.total_audits_count}
+\u{1F53B} \u10E1\u10E3\u10DA \u10D3\u10D0\u10DC\u10D0\u10D9\u10DA\u10D8\u10E1\u10D8: -${res.total_shortages_sum} ${cur}
+\u{1F53A} \u10E1\u10E3\u10DA \u10D6\u10D4\u10D3\u10DB\u10D4\u10E2\u10DD\u10D1\u10D0: +${res.total_surpluses_sum} ${cur}
+\u2696\uFE0F \u10EC\u10DB\u10D8\u10DC\u10D3\u10D0 \u10D1\u10D0\u10DA\u10D0\u10DC\u10E1\u10D8: ${res.net_balance} ${cur}
+
+\u{1F6A8} **\u10E7\u10D5\u10D4\u10DA\u10D0\u10D6\u10D4 \u10DE\u10E0\u10DD\u10D1\u10DA\u10D4\u10DB\u10E3\u10E0\u10D8 \u10DE\u10E0\u10DD\u10D3\u10E3\u10E5\u10E2\u10D4\u10D1\u10D8 (\u10D3\u10D0\u10DC\u10D0\u10D9\u10DA\u10D8\u10E1\u10D8\u10E1 \u10DB\u10D8\u10EE\u10D4\u10D3\u10D5\u10D8\u10D7):**
+${probText || "  \u2022 \u10DE\u10E0\u10DD\u10D1\u10DA\u10D4\u10DB\u10E3\u10E0\u10D8 \u10D2\u10D0\u10D3\u10D0\u10EE\u10E0\u10D4\u10D1\u10D8 \u10D0\u10E0 \u10D3\u10D0\u10E4\u10D8\u10E5\u10E1\u10D8\u10E0\u10D4\u10D1\u10E3\u10DA\u10D0 \u2705"}
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+`;
+        return {
+          content: [{ type: "text", text: summaryText.trim() + "\n\n" + JSON.stringify(res, null, 2) }]
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `\u10E8\u10D4\u10EA\u10D3\u10DD\u10DB\u10D0 \u10D8\u10DC\u10D5\u10D4\u10DC\u10E2\u10D0\u10E0\u10D8\u10D6\u10D0\u10EA\u10D8\u10D8\u10E1 \u10D0\u10DC\u10D0\u10DA\u10D8\u10D6\u10D8\u10E1\u10D0\u10E1: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+  server2.tool(
+    "get_recipe_calculations",
+    "\u10DB\u10D4\u10DC\u10D8\u10E3\u10E1 \u10D9\u10D0\u10DA\u10D9\u10E3\u10DA\u10D0\u10EA\u10D8\u10D4\u10D1\u10D8, \u10D7\u10D5\u10D8\u10D7\u10E6\u10D8\u10E0\u10D4\u10D1\u10E3\u10DA\u10D4\u10D1\u10D0 (Food Cost) \u10D3\u10D0 \u10DB\u10D0\u10E0\u10DF\u10D0 (Menu dish cost calculations, prime cost, gross profit margin, Food Cost %, markup %)",
+    {
+      tenant: z.string().optional().describe("Tenant ID \u10D0\u10DC Slug"),
+      category: z.string().optional().describe("\u10D9\u10D0\u10E2\u10D4\u10D2\u10DD\u10E0\u10D8\u10D8\u10E1 \u10E1\u10D0\u10EE\u10D4\u10DA\u10D8 \u10D0\u10DC ID \u10E4\u10D8\u10DA\u10E2\u10E0\u10D0\u10EA\u10D8\u10D8\u10E1\u10D7\u10D5\u10D8\u10E1"),
+      type: z.enum(["all", "kitchen", "bar", "restourant", "hookah"]).default("all").describe("\u10E2\u10D8\u10DE\u10D8 (\u10E1\u10D0\u10DB\u10D6\u10D0\u10E0\u10D4\u10E3\u10DA\u10DD, \u10D1\u10D0\u10E0\u10D8, \u10F0\u10E3\u10D9\u10D0)"),
+      search: z.string().optional().describe("\u10D9\u10D4\u10E0\u10EB\u10D8\u10E1 \u10E1\u10D0\u10EB\u10D8\u10D4\u10D1\u10DD \u10E1\u10D8\u10E2\u10E7\u10D5\u10D0"),
+      minFoodCost: z.number().optional().describe("\u10DB\u10D8\u10DC\u10D8\u10DB\u10D0\u10DA\u10E3\u10E0\u10D8 Food Cost % (\u10DB\u10D0\u10D2. 35-\u10D6\u10D4 \u10DB\u10D0\u10E6\u10D0\u10DA\u10D8 Food Cost-\u10D8\u10E1 \u10E1\u10D0\u10DE\u10DD\u10D5\u10DC\u10D4\u10DA\u10D0\u10D3)"),
+      maxFoodCost: z.number().optional().describe("\u10DB\u10D0\u10E5\u10E1\u10D8\u10DB\u10D0\u10DA\u10E3\u10E0\u10D8 Food Cost %"),
+      missingRecipesOnly: z.boolean().optional().describe("\u10DB\u10EE\u10DD\u10DA\u10DD\u10D3 \u10D8\u10E1 \u10D9\u10D4\u10E0\u10EB\u10D4\u10D1\u10D8, \u10E0\u10DD\u10DB\u10DA\u10D4\u10D1\u10E1\u10D0\u10EA \u10D0\u10E0 \u10D0\u10E5\u10D5\u10D7 \u10D9\u10D0\u10DA\u10D9\u10E3\u10DA\u10D0\u10EA\u10D8\u10D0/\u10E0\u10D4\u10EA\u10D4\u10DE\u10E2\u10D8"),
+      includeDisabled: z.boolean().default(false).describe("\u10D2\u10D0\u10D7\u10D8\u10E8\u10E3\u10DA\u10D8 \u10D9\u10D4\u10E0\u10EB\u10D4\u10D1\u10D8\u10E1 \u10E9\u10D5\u10D4\u10DC\u10D4\u10D1\u10D0"),
+      sortBy: z.enum(["food_cost_pct", "cost_price", "margin", "selling_price", "name"]).default("food_cost_pct").describe("\u10D3\u10D0\u10DA\u10D0\u10D2\u10D4\u10D1\u10D8\u10E1 \u10D5\u10D4\u10DA\u10D8"),
+      sortDirection: z.enum(["asc", "desc"]).default("desc").describe("\u10D6\u10E0\u10D3\u10D0\u10D3\u10DD\u10D1\u10D8\u10D7 \u10D0\u10DC \u10D9\u10DA\u10D4\u10D1\u10D0\u10D3\u10DD\u10D1\u10D8\u10D7"),
+      limit: z.number().default(50).describe("\u10DB\u10D0\u10E5\u10E1\u10D8\u10DB\u10D0\u10DA\u10E3\u10E0\u10D8 \u10E0\u10D0\u10DD\u10D3\u10D4\u10DC\u10DD\u10D1\u10D0")
+    },
+    async ({ tenant, category, type, search, minFoodCost, maxFoodCost, missingRecipesOnly, includeDisabled, sortBy, sortDirection, limit }) => {
+      try {
+        const res = await getRecipeCalculations(tenant, {
+          category,
+          type,
+          search,
+          minFoodCost,
+          maxFoodCost,
+          missingRecipesOnly,
+          includeDisabled,
+          sortBy,
+          sortDirection,
+          limit
+        });
+        const cur = res.tenant.currency;
+        const dishesText = res.dishes.slice(0, 30).map((d, idx) => {
+          const fcBadge = !d.has_recipe ? "\u26A0\uFE0F [\u10E0\u10D4\u10EA\u10D4\u10DE\u10E2\u10D8\u10E1 \u10D2\u10D0\u10E0\u10D4\u10E8\u10D4]" : d.food_cost_pct > 35 ? `\u{1F6A8} [FC: ${d.food_cost_pct}%]` : `\u2705 [FC: ${d.food_cost_pct}%]`;
+          return `  ${idx + 1}. ${d.name} (${d.category_name}) \u2014 \u10D2\u10D0\u10E1\u10D0\u10E7\u10D8\u10D3\u10D8: ${d.selling_price} ${cur} | \u10D7\u10D5\u10D8\u10D7\u10E6\u10D8\u10E0\u10D4\u10D1\u10E3\u10DA\u10D4\u10D1\u10D0: ${d.cost_price} ${cur} | \u10DB\u10D0\u10E0\u10DF\u10D0: ${d.gross_margin} ${cur} ${fcBadge} (${d.ingredients_count} \u10D8\u10DC\u10D2\u10E0\u10D4\u10D3\u10D8\u10D4\u10DC\u10E2\u10D8)`;
+        }).join("\n");
+        const summaryText = `
+\u{1F37D}\uFE0F **\u10DB\u10D4\u10DC\u10D8\u10E3\u10E1 \u10D9\u10D0\u10DA\u10D9\u10E3\u10DA\u10D0\u10EA\u10D8\u10D4\u10D1\u10D8 \u10D3\u10D0 \u10D7\u10D5\u10D8\u10D7\u10E6\u10D8\u10E0\u10D4\u10D1\u10E3\u10DA\u10D4\u10D1\u10D0 \u2014 ${res.tenant.name}**
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+\u{1F4CB} \u10E1\u10E3\u10DA \u10D9\u10D4\u10E0\u10EB\u10D4\u10D1\u10D8: ${res.summary.total_dishes_count} (\u10E0\u10D4\u10EA\u10D4\u10DE\u10E2\u10D8\u10D7: ${res.summary.dishes_with_recipe}, \u10E0\u10D4\u10EA\u10D4\u10DE\u10E2\u10D8\u10E1 \u10D2\u10D0\u10E0\u10D4\u10E8\u10D4: ${res.summary.dishes_without_recipe})
+\u{1F3AF} **\u10E1\u10D0\u10E8\u10E3\u10D0\u10DA\u10DD Food Cost:** ${res.summary.average_food_cost_pct}%
+\u{1F4B0} **\u10E1\u10D0\u10E8\u10E3\u10D0\u10DA\u10DD \u10D2\u10D0\u10E1\u10D0\u10E7\u10D8\u10D3\u10D8 \u10E4\u10D0\u10E1\u10D8:** ${res.summary.average_selling_price} ${cur}
+\u{1F4C9} **\u10E1\u10D0\u10E8\u10E3\u10D0\u10DA\u10DD \u10D7\u10D5\u10D8\u10D7\u10E6\u10D8\u10E0\u10D4\u10D1\u10E3\u10DA\u10D4\u10D1\u10D0:** ${res.summary.average_cost_price} ${cur}
+\u2696\uFE0F **\u10E1\u10D0\u10E8\u10E3\u10D0\u10DA\u10DD \u10DB\u10D0\u10E0\u10DF\u10D0/\u10DB\u10DD\u10D2\u10D4\u10D1\u10D0:** ${res.summary.average_margin} ${cur}
+\u{1F6A8} \u10DB\u10D0\u10E6\u10D0\u10DA\u10D8 Food Cost (>35%): ${res.summary.high_food_cost_count} \u10D9\u10D4\u10E0\u10EB\u10D8
+
+\u{1F4CB} **\u10D9\u10D4\u10E0\u10EB\u10D4\u10D1\u10D8\u10E1 \u10E0\u10D4\u10D4\u10E1\u10E2\u10E0\u10D8 (\u10D3\u10D0\u10DA\u10D0\u10D2\u10D4\u10D1\u10E3\u10DA\u10D8 ${sortBy}-\u10D8\u10D7):**
+${dishesText || "\u10D9\u10D4\u10E0\u10EB\u10D4\u10D1\u10D8 \u10DB\u10DD\u10EA\u10D4\u10DB\u10E3\u10DA\u10D8 \u10E4\u10D8\u10DA\u10E2\u10E0\u10D4\u10D1\u10D8\u10D7 \u10D0\u10E0 \u10DB\u10DD\u10D8\u10EB\u10D4\u10D1\u10DC\u10D0."}
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+`;
+        return {
+          content: [{ type: "text", text: summaryText.trim() + "\n\n" + JSON.stringify(res, null, 2) }]
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `\u10E8\u10D4\u10EA\u10D3\u10DD\u10DB\u10D0 \u10D9\u10D0\u10DA\u10D9\u10E3\u10DA\u10D0\u10EA\u10D8\u10D4\u10D1\u10D8\u10E1 \u10DB\u10D8\u10E6\u10D4\u10D1\u10D8\u10E1\u10D0\u10E1: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+  server2.tool(
+    "get_dish_recipe_details",
+    "\u10D9\u10DD\u10DC\u10D9\u10E0\u10D4\u10E2\u10E3\u10DA\u10D8 \u10D9\u10D4\u10E0\u10EB\u10D8\u10E1 \u10E2\u10D4\u10E5\u10DC\u10DD\u10DA\u10DD\u10D2\u10D8\u10E3\u10E0\u10D8 \u10D1\u10D0\u10E0\u10D0\u10D7\u10D8 / \u10D9\u10D0\u10DA\u10D9\u10E3\u10DA\u10D0\u10EA\u10D8\u10D8\u10E1 \u10D3\u10D4\u10E2\u10D0\u10DA\u10D4\u10D1\u10D8: \u10D8\u10DC\u10D2\u10E0\u10D4\u10D3\u10D8\u10D4\u10DC\u10E2\u10D4\u10D1\u10D8\u10E1 \u10E1\u10D8\u10D0, \u10EC\u10DD\u10DC\u10D4\u10D1\u10D8/\u10E0\u10D0\u10DD\u10D3\u10D4\u10DC\u10DD\u10D1\u10D4\u10D1\u10D8, \u10E4\u10D0\u10E1\u10D4\u10D1\u10D8 \u10D3\u10D0 \u10D7\u10D5\u10D8\u10D7\u10E6\u10D8\u10E0\u10D4\u10D1\u10E3\u10DA\u10D4\u10D1\u10D0\u10E8\u10D8 \u10EC\u10D8\u10DA\u10D8 (Detailed dish recipe breakdown: ingredients, portions, unit costs, cost share %)",
+    {
+      dish: z.union([z.string(), z.number()]).describe("\u10D9\u10D4\u10E0\u10EB\u10D8\u10E1 \u10E1\u10D0\u10EE\u10D4\u10DA\u10D8, ID \u10D0\u10DC Hash \u10D9\u10DD\u10D3\u10D8"),
+      tenant: z.string().optional().describe("Tenant ID \u10D0\u10DC Slug")
+    },
+    async ({ dish, tenant }) => {
+      try {
+        const res = await getDishRecipeDetails(dish, tenant);
+        const it = res.item;
+        const cur = it.currency;
+        const ingText = res.ingredients.map(
+          (ing, idx) => `  ${idx + 1}. ${ing.is_semi_finished ? "\u{1F963} [\u10DC/\u10E4] " : "\u{1F33F} "}${ing.product_name} \u2014 ${ing.quantity} ${ing.unit_name} x ${ing.unit_cost_price} GEL = ${ing.line_total_cost} ${cur} (\u10EC\u10D8\u10DA\u10D8: ${ing.cost_share_pct}%)`
+        ).join("\n");
+        const summaryText = `
+\u{1F372} **\u10E2\u10D4\u10E5\u10DC\u10DD\u10DA\u10DD\u10D2\u10D8\u10E3\u10E0\u10D8 \u10D1\u10D0\u10E0\u10D0\u10D7\u10D8: ${it.name} (${res.tenant_name})**
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+\u{1F3DB}\uFE0F \u10D9\u10D0\u10E2\u10D4\u10D2\u10DD\u10E0\u10D8\u10D0: ${it.category_name} | \u10E2\u10D8\u10DE\u10D8: ${it.type}
+\u{1F4B0} **\u10D2\u10D0\u10E1\u10D0\u10E7\u10D8\u10D3\u10D8 \u10E4\u10D0\u10E1\u10D8:** ${it.selling_price} ${cur}
+\u{1F4C9} **\u10D7\u10D5\u10D8\u10D7\u10E6\u10D8\u10E0\u10D4\u10D1\u10E3\u10DA\u10D4\u10D1\u10D0 (Prime Cost):** ${it.prime_cost} ${cur}
+\u2696\uFE0F **\u10DB\u10D0\u10E0\u10DF\u10D0 / \u10DB\u10DD\u10D2\u10D4\u10D1\u10D0 \u10DE\u10DD\u10E0\u10EA\u10D8\u10D0\u10D6\u10D4:** ${it.gross_margin} ${cur}
+\u{1F3AF} **Food Cost:** ${it.food_cost_pct}% | **\u10E4\u10D0\u10E1\u10DC\u10D0\u10DB\u10D0\u10E2\u10D8:** ${it.markup_pct}%
+
+\u{1F33F} **\u10D9\u10D0\u10DA\u10D9\u10E3\u10DA\u10D0\u10EA\u10D8\u10D8\u10E1 \u10D8\u10DC\u10D2\u10E0\u10D4\u10D3\u10D8\u10D4\u10DC\u10E2\u10D4\u10D1\u10D8 (${it.ingredients_count}):**
+${ingText || "  \u2022 \u10D8\u10DC\u10D2\u10E0\u10D4\u10D3\u10D8\u10D4\u10DC\u10E2\u10D4\u10D1\u10D8 \u10D0\u10E0 \u10D0\u10E0\u10D8\u10E1 \u10DB\u10D8\u10D7\u10D8\u10D7\u10D4\u10D1\u10E3\u10DA\u10D8 (\u10E0\u10D4\u10EA\u10D4\u10DE\u10E2\u10D8 \u10EA\u10D0\u10E0\u10D8\u10D4\u10DA\u10D8\u10D0)"}
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+`;
+        return {
+          content: [{ type: "text", text: summaryText.trim() + "\n\n" + JSON.stringify(res, null, 2) }]
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `\u10E8\u10D4\u10EA\u10D3\u10DD\u10DB\u10D0 \u10E0\u10D4\u10EA\u10D4\u10DE\u10E2\u10D8\u10E1 \u10D3\u10D4\u10E2\u10D0\u10DA\u10D4\u10D1\u10D8\u10E1 \u10DB\u10D8\u10E6\u10D4\u10D1\u10D8\u10E1\u10D0\u10E1: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+  server2.tool(
+    "get_semi_finished_products",
+    "\u10DC\u10D0\u10EE\u10D4\u10D5\u10D0\u10E0\u10E4\u10D0\u10D1\u10E0\u10D8\u10D9\u10D0\u10E2\u10D4\u10D1\u10D8\u10E1 \u10E1\u10D8\u10D0, \u10D2\u10D0\u10DB\u10DD\u10E1\u10D0\u10D5\u10D0\u10DA\u10D8 \u10EC\u10DD\u10DC\u10D0 \u10D3\u10D0 \u10D7\u10D5\u10D8\u10D7\u10E6\u10D8\u10E0\u10D4\u10D1\u10E3\u10DA\u10D4\u10D1\u10D8\u10E1 \u10D9\u10D0\u10DA\u10D9\u10E3\u10DA\u10D0\u10EA\u10D8\u10D0 (Semi-finished products registry: yield weight, batch cost, unit cost per kg/l, nested ingredients)",
+    {
+      tenant: z.string().optional().describe("Tenant ID \u10D0\u10DC Slug"),
+      search: z.string().optional().describe("\u10E1\u10D0\u10EB\u10D8\u10D4\u10D1\u10DD \u10E2\u10D4\u10E5\u10E1\u10E2\u10D8")
+    },
+    async ({ tenant, search }) => {
+      try {
+        const res = await getSemiFinishedAnalytics(tenant, search);
+        const listText = res.items.map((s) => {
+          const ingList = s.ingredients.map((i) => `    - ${i.product_name}: ${i.quantity} ${i.unit_name} (${i.total_cost} GEL)`).join("\n");
+          return `\u{1F963} **${s.name}**
+  \u2022 \u10D2\u10D0\u10DB\u10DD\u10E1\u10D0\u10D5\u10D0\u10DA\u10D8: ${s.yield_target_weight} ${s.unit_name} | \u10DE\u10D0\u10E0\u10E2\u10D8\u10D8\u10E1 \u10D7\u10D5\u10D8\u10D7\u10E6\u10D8\u10E0\u10D4\u10D1\u10E3\u10DA\u10D4\u10D1\u10D0: ${s.batch_total_cost} GEL | 1 ${s.unit_name}-\u10D8\u10E1 \u10E4\u10D0\u10E1\u10D8: ${s.calculated_cost_per_unit} GEL
+  \u2022 \u10D8\u10DC\u10D2\u10E0\u10D4\u10D3\u10D8\u10D4\u10DC\u10E2\u10D4\u10D1\u10D8 (${s.ingredients_count}):
+${ingList || "    - \u10D8\u10DC\u10D2\u10E0\u10D4\u10D3\u10D8\u10D4\u10DC\u10E2\u10D4\u10D1\u10D8 \u10D0\u10E0 \u10D0\u10E0\u10D8\u10E1"}`;
+        }).join("\n\n");
+        const summaryText = `
+\u{1F963} **\u10DC\u10D0\u10EE\u10D4\u10D5\u10D0\u10E0\u10E4\u10D0\u10D1\u10E0\u10D8\u10D9\u10D0\u10E2\u10D4\u10D1\u10D8\u10E1 \u10E0\u10D4\u10D4\u10E1\u10E2\u10E0\u10D8 \u2014 ${res.tenant_name}**
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+\u10E1\u10E3\u10DA \u10DC\u10D0\u10EE\u10D4\u10D5\u10D0\u10E0\u10E4\u10D0\u10D1\u10E0\u10D8\u10D9\u10D0\u10E2\u10D8: ${res.total_semi_finished_count}
+
+${listText || "\u10DC\u10D0\u10EE\u10D4\u10D5\u10D0\u10E0\u10E4\u10D0\u10D1\u10E0\u10D8\u10D9\u10D0\u10E2\u10D4\u10D1\u10D8 \u10D0\u10E0 \u10DB\u10DD\u10D8\u10EB\u10D4\u10D1\u10DC\u10D0."}
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+`;
+        return {
+          content: [{ type: "text", text: summaryText.trim() + "\n\n" + JSON.stringify(res, null, 2) }]
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `\u10E8\u10D4\u10EA\u10D3\u10DD\u10DB\u10D0 \u10DC\u10D0\u10EE\u10D4\u10D5\u10D0\u10E0\u10E4\u10D0\u10D1\u10E0\u10D8\u10D9\u10D0\u10E2\u10D4\u10D1\u10D8\u10E1 \u10DB\u10D8\u10E6\u10D4\u10D1\u10D8\u10E1\u10D0\u10E1: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
 }
 
 // src/resources.ts
@@ -1816,6 +3012,58 @@ function registerResources(server2) {
     async (uri, { tenant }) => {
       const tenantStr = typeof tenant === "string" ? tenant : void 0;
       const data = await getInventoryAlerts(tenantStr);
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(data, null, 2)
+          }
+        ]
+      };
+    }
+  );
+  server2.resource(
+    "purchases-summary",
+    new ResourceTemplate("pos://purchases/summary{?tenant,period}", { list: void 0 }),
+    async (uri, { tenant, period }) => {
+      const tenantStr = typeof tenant === "string" ? tenant : void 0;
+      const periodStr = typeof period === "string" ? period : "this_month";
+      const data = await getPurchasesAnalytics(tenantStr, periodStr);
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(data, null, 2)
+          }
+        ]
+      };
+    }
+  );
+  server2.resource(
+    "inventory-acts",
+    new ResourceTemplate("pos://inventory/acts{?tenant}", { list: void 0 }),
+    async (uri, { tenant }) => {
+      const tenantStr = typeof tenant === "string" ? tenant : void 0;
+      const data = await getInventoryActs(tenantStr);
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(data, null, 2)
+          }
+        ]
+      };
+    }
+  );
+  server2.resource(
+    "recipes-calculations",
+    new ResourceTemplate("pos://recipes/calculations{?tenant}", { list: void 0 }),
+    async (uri, { tenant }) => {
+      const tenantStr = typeof tenant === "string" ? tenant : void 0;
+      const data = await getRecipeCalculations(tenantStr);
       return {
         contents: [
           {

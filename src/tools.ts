@@ -9,6 +9,9 @@ import { getShiftAnalytics } from './analytics/shiftAnalytics.js';
 import { getInventoryAlerts } from './analytics/inventoryAlerts.js';
 import { getActiveOrders } from './analytics/activeOrders.js';
 import { getStaffPerformance } from './analytics/staffPerformance.js';
+import { getPurchasesAnalytics, searchPurchases, getPurchaseDetails } from './analytics/purchasesAnalytics.js';
+import { getInventoryActs, getInventoryActDetails, getInventoryDiscrepancySummary } from './analytics/inventoriesAnalytics.js';
+import { getRecipeCalculations, getDishRecipeDetails, getSemiFinishedAnalytics } from './analytics/calculationsAnalytics.js';
 
 export function registerTools(server: McpServer) {
   // 1. Tool: list_tenants
@@ -547,5 +550,460 @@ ${posText || '  • POS მიტანის შეკვეთები არ
       }
     }
   );
-}
 
+  // ============================================================
+  // PURCHASES (შესყიდვები / Закупки)
+  // ============================================================
+
+  // 13. Tool: get_purchases_analytics
+  server.tool(
+    'get_purchases_analytics',
+    'შესყიდვებისა და მიღებების სრული ანალიტიკა: ჯამური შესყიდვები, მომწოდებლები, საწყობები და ტოპ შესყიდული პროდუქტები (Purchases and procurement analytics by period, suppliers, warehouses, top products)',
+    {
+      tenant: z.string().optional().describe('Tenant ID ან Slug'),
+      period: z.enum(['today', 'yesterday', 'this_week', 'this_month', 'last_month', 'custom']).default('this_month').describe('საანგარიშო პერიოდი'),
+      startDate: z.string().optional().describe('საწყისი თარიღი YYYY-MM-DD (თუ period=custom)'),
+      endDate: z.string().optional().describe('საბოლოო თარიღი YYYY-MM-DD (თუ period=custom)'),
+      supplierId: z.union([z.string(), z.number()]).optional().describe('ფილტრი კონკრეტულ მომწოდებელზე'),
+      warehouse: z.string().optional().describe('საწყობი (bar, kitchen, main, ALL)')
+    },
+    async ({ tenant, period, startDate, endDate, supplierId, warehouse }) => {
+      try {
+        const res = await getPurchasesAnalytics(tenant, period, startDate, endDate, supplierId, warehouse);
+        const cur = res.tenant.currency;
+
+        const supText = res.suppliers_summary.slice(0, 8).map((s, idx) => 
+          `  ${idx + 1}. ${s.supplier_name} — ${s.total_amount} ${cur} (${s.invoices_count} ზედნადები, ${s.items_count} პოზიცია)`
+        ).join('\n');
+
+        const whText = res.warehouse_breakdown.map(w => 
+          `  • ${w.warehouse_name}: ${w.total_amount} ${cur} (${w.items_count} პოზიცია)`
+        ).join('\n');
+
+        const topProdsText = res.top_purchased_products.slice(0, 10).map((p, idx) => 
+          `  ${idx + 1}. ${p.product_name} — ${p.total_amount} ${cur} (${p.total_quantity} ${p.unit_name}, საშ. ფასი: ${p.average_unit_price} ${cur})`
+        ).join('\n');
+
+        const summaryText = `
+🚚 **შესყიდვების ანალიტიკა — ${res.tenant.name} (${res.period_label})**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💰 **ჯამური შესყიდვები:** ${res.summary.total_purchase_amount} ${cur}
+📑 **ზედნადებების რაოდენობა:** ${res.summary.total_invoices_count} (საშუალო ზედნადები: ${res.summary.average_invoice_amount} ${cur})
+📦 **შესყიდული პოზიციები:** ${res.summary.total_items_count} ჩანაწერი
+
+🏛️ **განაწილება საწყობების მიხედვით:**
+${whText || '  • მონაცემები არ არის'}
+
+🚚 **ტოპ მომწოდებლები:**
+${supText || '  • მომწოდებლები არ ფიქსირდება'}
+
+🔝 **ტოპ შესყიდული პროდუქტები:**
+${topProdsText || '  • პროდუქტები არ ფიქსირდება'}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`;
+        return {
+          content: [{ type: 'text', text: summaryText.trim() + '\n\n' + JSON.stringify(res, null, 2) }]
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: 'text', text: `შეცდომა შესყიდვების ანალიზისას: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  // 14. Tool: search_purchases
+  server.tool(
+    'search_purchases',
+    'შესყიდვების/ზედნადებების ძებნა და ფილტრაცია: ზედნადების ნომრით, პროდუქტის სახელით ან მომწოდებლით (Search purchases and invoices by waybill code, product name, supplier)',
+    {
+      tenant: z.string().optional().describe('Tenant ID ან Slug'),
+      query: z.string().optional().describe('საძიებო ტექსტი (ზედნადების ნომერი ან პროდუქტის სახელი)'),
+      supplierId: z.union([z.string(), z.number()]).optional().describe('მომწოდებლის ID'),
+      warehouse: z.string().optional().describe('საწყობი (bar, kitchen, main, ALL)'),
+      period: z.enum(['today', 'yesterday', 'this_week', 'this_month', 'last_month', 'custom']).optional(),
+      startDate: z.string().optional().describe('YYYY-MM-DD'),
+      endDate: z.string().optional().describe('YYYY-MM-DD'),
+      limit: z.number().default(25).describe('მაქსიმალური რაოდენობა')
+    },
+    async ({ tenant, query, supplierId, warehouse, period, startDate, endDate, limit }) => {
+      try {
+        const res = await searchPurchases(tenant, {
+          query,
+          supplierId,
+          warehouse,
+          period,
+          startDate,
+          endDate,
+          limit
+        });
+
+        const listText = res.items.map(it => 
+          `• [ზედნადები: ${it.invoice_code}] ${it.product_name} — ${it.quantity} ${it.unit_name} x ${it.unit_price} GEL = ${it.total_price} GEL | მომწოდებელი: ${it.supplier_name} | თარიღი: ${new Date(it.date).toLocaleDateString('ka-GE')}`
+        ).join('\n');
+
+        const summaryText = `
+🔍 **შესყიდვების ძებნის შედეგები — ${res.tenant_name}**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+სულ მოიძებნა: ${res.total_found} ჩანაწერი
+
+${listText || 'ჩანაწერები მოცემული პარამეტრებით ვერ მოიძებნა.'}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`;
+        return {
+          content: [{ type: 'text', text: summaryText.trim() + '\n\n' + JSON.stringify(res, null, 2) }]
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: 'text', text: `შეცდომა შესყიდვების ძებნისას: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  // 15. Tool: get_purchase_details
+  server.tool(
+    'get_purchase_details',
+    'კონკრეტული ზედნადების/შესყიდვის სრული შემადგენლობა: პროდუქტები, რაოდენობები, შესასყიდი ფასები და მომწოდებელი (Detailed invoice line items breakdown, quantities, purchase prices, supplier info)',
+    {
+      invoiceCode: z.union([z.string(), z.number()]).describe('ზედნადების ნომერი (Code) ან შესყიდვის ID'),
+      tenant: z.string().optional().describe('Tenant ID ან Slug')
+    },
+    async ({ invoiceCode, tenant }) => {
+      try {
+        const res = await getPurchaseDetails(invoiceCode, tenant);
+
+        const itemsText = res.items.map((it, idx) => 
+          `  ${idx + 1}. ${it.product_name} — ${it.quantity} ${it.unit_name} x ${it.unit_price} GEL = ${it.total_price} GEL`
+        ).join('\n');
+
+        const summaryText = `
+📑 **ზედნადების დეტალები: #${res.invoice_code} (${res.tenant_name})**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📅 თარიღი: ${new Date(res.date).toLocaleString('ka-GE')}
+🏢 საწყობი: ${res.warehouse_type}
+🚚 მომწოდებელი: ${res.supplier.name} ${res.supplier.code ? `(ს/კ: ${res.supplier.code})` : ''} ${res.supplier.contact ? `| ტელ: ${res.supplier.contact}` : ''}
+
+📦 **პოზიციების სია (${res.total_items_count}):**
+${itemsText || '  • პოზიციები არ არის'}
+
+💰 **სულ ზედნადების ჯამი:** ${res.grand_total} ${res.currency}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`;
+        return {
+          content: [{ type: 'text', text: summaryText.trim() + '\n\n' + JSON.stringify(res, null, 2) }]
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: 'text', text: `შეცდომა ზედნადების დეტალების მიღებისას: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  // ============================================================
+  // INVENTORIES (ინვენტარიზაციები / Инвентаризации)
+  // ============================================================
+
+  // 16. Tool: get_inventory_acts
+  server.tool(
+    'get_inventory_acts',
+    'ინვენტარიზაციის აქტების სია, დანაკლისები და ზედმეტობები (Inventory audit acts history: shortages, surpluses, net balance, date, warehouse)',
+    {
+      tenant: z.string().optional().describe('Tenant ID ან Slug'),
+      period: z.enum(['all', 'today', 'yesterday', 'this_week', 'this_month', 'last_month', 'custom']).default('all').describe('პერიოდი'),
+      startDate: z.string().optional().describe('YYYY-MM-DD'),
+      endDate: z.string().optional().describe('YYYY-MM-DD'),
+      warehouse: z.string().optional().describe('საწყობი (bar, kitchen, restourant, storage, ყველა)'),
+      status: z.enum(['all', 'completed', 'draft']).default('all').describe('სტატუსი'),
+      limit: z.number().default(25).describe('მაქსიმალური რაოდენობა')
+    },
+    async ({ tenant, period, startDate, endDate, warehouse, status, limit }) => {
+      try {
+        const res = await getInventoryActs(tenant, {
+          period,
+          startDate,
+          endDate,
+          warehouse,
+          status,
+          limit
+        });
+        const cur = res.tenant.currency;
+
+        const actsText = res.acts.map(a => 
+          `• [აქტი #${a.id}] ${new Date(a.date).toLocaleDateString('ka-GE')} | საწყობი: ${a.warehouse_type} | შემოწმდა: ${a.total_items} პროდუქტი\n  🔻 დანაკლისი: -${a.shortage_amount} ${cur} | 🔺 ზედმეტობა: +${a.surplus_amount} ${cur} | ⚖️ სალდო: ${a.net_amount} ${cur} ${a.comment ? `(${a.comment})` : ''}`
+        ).join('\n\n');
+
+        const summaryText = `
+📋 **ინვენტარიზაციის აქტების რეესტრი — ${res.tenant.name} ${res.period_label ? `(${res.period_label})` : ''}**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 სულ ჩატარებული ინვენტარიზაცია: ${res.summary.total_acts_count}
+📦 შემოწმებული პოზიციები ჯამში: ${res.summary.total_items_checked}
+🔻 ჯამური დანაკლისი: -${res.summary.total_shortage_amount} ${cur}
+🔺 ჯამური ზედმეტობა: +${res.summary.total_surplus_amount} ${cur}
+⚖️ წმინდა ფინანსური სხვაობა: ${res.summary.total_net_discrepancy} ${cur}
+
+📋 **აქტების სია:**
+${actsText || 'ინვენტარიზაციის აქტები არ მოიძებნა.'}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`;
+        return {
+          content: [{ type: 'text', text: summaryText.trim() + '\n\n' + JSON.stringify(res, null, 2) }]
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: 'text', text: `შეცდომა ინვენტარიზაციების მიღებისას: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  // 17. Tool: get_inventory_act_details
+  server.tool(
+    'get_inventory_act_details',
+    'კონკრეტული ინვენტარიზაციის აქტის სრული დეტალები: აღრიცხული vs ფაქტიური ნაშთები, სხვაობები და დანაკლისები/ზედმეტობები (Detailed inventory audit breakdown: expected vs actual stock, discrepancies, top shortages and surpluses)',
+    {
+      actId: z.number().describe('ინვენტარიზაციის აქტის ID'),
+      tenant: z.string().optional().describe('Tenant ID ან Slug')
+    },
+    async ({ actId, tenant }) => {
+      try {
+        const res = await getInventoryActDetails(actId, tenant);
+        const a = res.act;
+        const cur = a.currency;
+
+        const shortagesText = res.top_shortages.map((s, idx) => 
+          `  ${idx + 1}. 🔻 ${s.product_name} — სხვაობა: ${s.difference} ${s.unit_name} (აღრიცხული: ${s.expected_stock}, ფაქტიური: ${s.actual_stock}) = ${s.diff_amount} ${cur}`
+        ).join('\n');
+
+        const surplusesText = res.top_surpluses.map((s, idx) => 
+          `  ${idx + 1}. 🔺 ${s.product_name} — სხვაობა: +${s.difference} ${s.unit_name} (აღრიცხული: ${s.expected_stock}, ფაქტიური: ${s.actual_stock}) = +${s.diff_amount} ${cur}`
+        ).join('\n');
+
+        const summaryText = `
+📑 **ინვენტარიზაციის აქტი #${a.id} — ${res.tenant_name}**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📅 თარიღი: ${new Date(a.created_at).toLocaleString('ka-GE')}
+🏛️ საწყობი: ${a.warehouse_type} | სტატუსი: ${a.status} ${a.comment ? `| კომენტარი: ${a.comment}` : ''}
+👤 შემსრულებელი: ${a.created_by_name}
+
+📊 **ფინანსური შედეგი:**
+  • შემოწმებული პოზიციები: ${res.statistics.total_items_count} (ზუსტი: ${res.statistics.exact_count}, დანაკლისი: ${res.statistics.shortages_count}, ზედმეტობა: ${res.statistics.surpluses_count})
+  • 🔻 დანაკლისი ჯამში: -${a.shortage_amount} ${cur}
+  • 🔺 ზედმეტობა ჯამში: +${a.surplus_amount} ${cur}
+  • ⚖️ **წმინდა სალდო:** ${a.net_amount} ${cur}
+
+🔻 **უდიდესი დანაკლისები (Top Shortages):**
+${shortagesText || '  • დანაკლისი არ არის ✅'}
+
+🔺 **უდიდესი ზედმეტობები (Top Surpluses):**
+${surplusesText || '  • ზედმეტობა არ არის'}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`;
+        return {
+          content: [{ type: 'text', text: summaryText.trim() + '\n\n' + JSON.stringify(res, null, 2) }]
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: 'text', text: `შეცდომა აქტის დეტალების მიღებისას: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  // 18. Tool: get_inventory_discrepancy_summary
+  server.tool(
+    'get_inventory_discrepancy_summary',
+    'ინვენტარიზაციების ჯამური ანალიტიკა: ყველაზე პრობლემური პროდუქტები ხშირი დანაკლისებითა და ზედმეტობებით (Discrepancy summary across audits: most problematic products by shortage amounts)',
+    {
+      tenant: z.string().optional().describe('Tenant ID ან Slug'),
+      period: z.enum(['today', 'yesterday', 'this_week', 'this_month', 'last_month', 'custom']).default('this_month').describe('პერიოდი'),
+      startDate: z.string().optional().describe('YYYY-MM-DD'),
+      endDate: z.string().optional().describe('YYYY-MM-DD')
+    },
+    async ({ tenant, period, startDate, endDate }) => {
+      try {
+        const res = await getInventoryDiscrepancySummary(tenant, period, startDate, endDate);
+        const cur = res.currency;
+
+        const probText = res.problematic_products.slice(0, 15).map((p, idx) => 
+          `  ${idx + 1}. ⚠️ ${p.product_name} — დანაკლისი: -${p.total_shortage_amount} ${cur} (${p.total_shortage_qty} ${p.unit_name}) | ზედმეტობა: +${p.total_surplus_amount} ${cur} | წმინდა: ${p.net_diff_amount} ${cur} (${p.discrepancy_occurrences} აქტში)`
+        ).join('\n');
+
+        const summaryText = `
+⚠️ **ინვენტარიზაციის გადახრების ანალიზი — ${res.tenant_name} (${res.period_label})**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 გაანალიზებული აქტები: ${res.total_audits_count}
+🔻 სულ დანაკლისი: -${res.total_shortages_sum} ${cur}
+🔺 სულ ზედმეტობა: +${res.total_surpluses_sum} ${cur}
+⚖️ წმინდა ბალანსი: ${res.net_balance} ${cur}
+
+🚨 **ყველაზე პრობლემური პროდუქტები (დანაკლისის მიხედვით):**
+${probText || '  • პრობლემური გადახრები არ დაფიქსირებულა ✅'}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`;
+        return {
+          content: [{ type: 'text', text: summaryText.trim() + '\n\n' + JSON.stringify(res, null, 2) }]
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: 'text', text: `შეცდომა ინვენტარიზაციის ანალიზისას: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  // ============================================================
+  // CALCULATIONS & RECIPES (კალკულაციები / Калькуляции и техкарты)
+  // ============================================================
+
+  // 19. Tool: get_recipe_calculations
+  server.tool(
+    'get_recipe_calculations',
+    'მენიუს კალკულაციები, თვითღირებულება (Food Cost) და მარჟა (Menu dish cost calculations, prime cost, gross profit margin, Food Cost %, markup %)',
+    {
+      tenant: z.string().optional().describe('Tenant ID ან Slug'),
+      category: z.string().optional().describe('კატეგორიის სახელი ან ID ფილტრაციისთვის'),
+      type: z.enum(['all', 'kitchen', 'bar', 'restourant', 'hookah']).default('all').describe('ტიპი (სამზარეულო, ბარი, ჰუკა)'),
+      search: z.string().optional().describe('კერძის საძიებო სიტყვა'),
+      minFoodCost: z.number().optional().describe('მინიმალური Food Cost % (მაგ. 35-ზე მაღალი Food Cost-ის საპოვნელად)'),
+      maxFoodCost: z.number().optional().describe('მაქსიმალური Food Cost %'),
+      missingRecipesOnly: z.boolean().optional().describe('მხოლოდ ის კერძები, რომლებსაც არ აქვთ კალკულაცია/რეცეპტი'),
+      includeDisabled: z.boolean().default(false).describe('გათიშული კერძების ჩვენება'),
+      sortBy: z.enum(['food_cost_pct', 'cost_price', 'margin', 'selling_price', 'name']).default('food_cost_pct').describe('დალაგების ველი'),
+      sortDirection: z.enum(['asc', 'desc']).default('desc').describe('ზრდადობით ან კლებადობით'),
+      limit: z.number().default(50).describe('მაქსიმალური რაოდენობა')
+    },
+    async ({ tenant, category, type, search, minFoodCost, maxFoodCost, missingRecipesOnly, includeDisabled, sortBy, sortDirection, limit }) => {
+      try {
+        const res = await getRecipeCalculations(tenant, {
+          category,
+          type,
+          search,
+          minFoodCost,
+          maxFoodCost,
+          missingRecipesOnly,
+          includeDisabled,
+          sortBy,
+          sortDirection,
+          limit
+        });
+        const cur = res.tenant.currency;
+
+        const dishesText = res.dishes.slice(0, 30).map((d, idx) => {
+          const fcBadge = !d.has_recipe ? '⚠️ [რეცეპტის გარეშე]' : d.food_cost_pct > 35 ? `🚨 [FC: ${d.food_cost_pct}%]` : `✅ [FC: ${d.food_cost_pct}%]`;
+          return `  ${idx + 1}. ${d.name} (${d.category_name}) — გასაყიდი: ${d.selling_price} ${cur} | თვითღირებულება: ${d.cost_price} ${cur} | მარჟა: ${d.gross_margin} ${cur} ${fcBadge} (${d.ingredients_count} ინგრედიენტი)`;
+        }).join('\n');
+
+        const summaryText = `
+🍽️ **მენიუს კალკულაციები და თვითღირებულება — ${res.tenant.name}**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📋 სულ კერძები: ${res.summary.total_dishes_count} (რეცეპტით: ${res.summary.dishes_with_recipe}, რეცეპტის გარეშე: ${res.summary.dishes_without_recipe})
+🎯 **საშუალო Food Cost:** ${res.summary.average_food_cost_pct}%
+💰 **საშუალო გასაყიდი ფასი:** ${res.summary.average_selling_price} ${cur}
+📉 **საშუალო თვითღირებულება:** ${res.summary.average_cost_price} ${cur}
+⚖️ **საშუალო მარჟა/მოგება:** ${res.summary.average_margin} ${cur}
+🚨 მაღალი Food Cost (>35%): ${res.summary.high_food_cost_count} კერძი
+
+📋 **კერძების რეესტრი (დალაგებული ${sortBy}-ით):**
+${dishesText || 'კერძები მოცემული ფილტრებით არ მოიძებნა.'}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`;
+        return {
+          content: [{ type: 'text', text: summaryText.trim() + '\n\n' + JSON.stringify(res, null, 2) }]
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: 'text', text: `შეცდომა კალკულაციების მიღებისას: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  // 20. Tool: get_dish_recipe_details
+  server.tool(
+    'get_dish_recipe_details',
+    'კონკრეტული კერძის ტექნოლოგიური ბარათი / კალკულაციის დეტალები: ინგრედიენტების სია, წონები/რაოდენობები, ფასები და თვითღირებულებაში წილი (Detailed dish recipe breakdown: ingredients, portions, unit costs, cost share %)',
+    {
+      dish: z.union([z.string(), z.number()]).describe('კერძის სახელი, ID ან Hash კოდი'),
+      tenant: z.string().optional().describe('Tenant ID ან Slug')
+    },
+    async ({ dish, tenant }) => {
+      try {
+        const res = await getDishRecipeDetails(dish, tenant);
+        const it = res.item;
+        const cur = it.currency;
+
+        const ingText = res.ingredients.map((ing, idx) => 
+          `  ${idx + 1}. ${ing.is_semi_finished ? '🥣 [ნ/ფ] ' : '🌿 '}${ing.product_name} — ${ing.quantity} ${ing.unit_name} x ${ing.unit_cost_price} GEL = ${ing.line_total_cost} ${cur} (წილი: ${ing.cost_share_pct}%)`
+        ).join('\n');
+
+        const summaryText = `
+🍲 **ტექნოლოგიური ბარათი: ${it.name} (${res.tenant_name})**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🏛️ კატეგორია: ${it.category_name} | ტიპი: ${it.type}
+💰 **გასაყიდი ფასი:** ${it.selling_price} ${cur}
+📉 **თვითღირებულება (Prime Cost):** ${it.prime_cost} ${cur}
+⚖️ **მარჟა / მოგება პორციაზე:** ${it.gross_margin} ${cur}
+🎯 **Food Cost:** ${it.food_cost_pct}% | **ფასნამატი:** ${it.markup_pct}%
+
+🌿 **კალკულაციის ინგრედიენტები (${it.ingredients_count}):**
+${ingText || '  • ინგრედიენტები არ არის მითითებული (რეცეპტი ცარიელია)'}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`;
+        return {
+          content: [{ type: 'text', text: summaryText.trim() + '\n\n' + JSON.stringify(res, null, 2) }]
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: 'text', text: `შეცდომა რეცეპტის დეტალების მიღებისას: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  // 21. Tool: get_semi_finished_products
+  server.tool(
+    'get_semi_finished_products',
+    'ნახევარფაბრიკატების სია, გამოსავალი წონა და თვითღირებულების კალკულაცია (Semi-finished products registry: yield weight, batch cost, unit cost per kg/l, nested ingredients)',
+    {
+      tenant: z.string().optional().describe('Tenant ID ან Slug'),
+      search: z.string().optional().describe('საძიებო ტექსტი')
+    },
+    async ({ tenant, search }) => {
+      try {
+        const res = await getSemiFinishedAnalytics(tenant, search);
+
+        const listText = res.items.map(s => {
+          const ingList = s.ingredients.map(i => `    - ${i.product_name}: ${i.quantity} ${i.unit_name} (${i.total_cost} GEL)`).join('\n');
+          return `🥣 **${s.name}**\n  • გამოსავალი: ${s.yield_target_weight} ${s.unit_name} | პარტიის თვითღირებულება: ${s.batch_total_cost} GEL | 1 ${s.unit_name}-ის ფასი: ${s.calculated_cost_per_unit} GEL\n  • ინგრედიენტები (${s.ingredients_count}):\n${ingList || '    - ინგრედიენტები არ არის'}`;
+        }).join('\n\n');
+
+        const summaryText = `
+🥣 **ნახევარფაბრიკატების რეესტრი — ${res.tenant_name}**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+სულ ნახევარფაბრიკატი: ${res.total_semi_finished_count}
+
+${listText || 'ნახევარფაბრიკატები არ მოიძებნა.'}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`;
+        return {
+          content: [{ type: 'text', text: summaryText.trim() + '\n\n' + JSON.stringify(res, null, 2) }]
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: 'text', text: `შეცდომა ნახევარფაბრიკატების მიღებისას: ${err.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+}

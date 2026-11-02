@@ -9,6 +9,9 @@ import { getInventoryAlerts } from './analytics/inventoryAlerts.js';
 import { getActiveOrders } from './analytics/activeOrders.js';
 import { getStaffPerformance } from './analytics/staffPerformance.js';
 import { searchOrders, getOrderDetails, getDeliveryOrders } from './analytics/orderSearch.js';
+import { getPurchasesAnalytics, searchPurchases, getPurchaseDetails } from './analytics/purchasesAnalytics.js';
+import { getInventoryActs, getInventoryActDetails, getInventoryDiscrepancySummary } from './analytics/inventoriesAnalytics.js';
+import { getRecipeCalculations, getDishRecipeDetails, getSemiFinishedAnalytics } from './analytics/calculationsAnalytics.js';
 
 export const restRouter = Router();
 
@@ -69,10 +72,9 @@ restRouter.get('/top-items', async (req: Request, res: Response) => {
   try {
     const tenant = (req.query.tenant as string) || undefined;
     const period = (req.query.period as string) || 'today';
-    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 10;
-    const startDate = (req.query.startDate as string) || undefined;
-    const endDate = (req.query.endDate as string) || undefined;
-    const top = await getTopSellingItems(tenant, period, limit, startDate, endDate);
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 15;
+    const sortBy = (req.query.sortBy as any) || 'revenue';
+    const top = await getTopSellingItems(tenant, period, limit, sortBy);
     res.json(top);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -97,8 +99,7 @@ restRouter.get('/expenses', async (req: Request, res: Response) => {
 restRouter.get('/inventory-alerts', async (req: Request, res: Response) => {
   try {
     const tenant = (req.query.tenant as string) || undefined;
-    const threshold = req.query.threshold ? parseFloat(req.query.threshold as string) : 0;
-    const alerts = await getInventoryAlerts(tenant, threshold);
+    const alerts = await getInventoryAlerts(tenant);
     res.json(alerts);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -133,11 +134,27 @@ restRouter.get('/staff-performance', async (req: Request, res: Response) => {
 // 10. Search Orders
 restRouter.get('/search-orders', async (req: Request, res: Response) => {
   try {
-    const query = (req.query.query as string) || '';
     const tenant = (req.query.tenant as string) || undefined;
-    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 10;
-    const results = await searchOrders(query, tenant, limit);
-    res.json({ results });
+    const query = (req.query.query as string) || undefined;
+    const deliveryType = (req.query.deliveryType as any) || 'all';
+    const status = (req.query.status as any) || 'all';
+    const period = (req.query.period as any) || undefined;
+    const startDate = (req.query.startDate as string) || undefined;
+    const endDate = (req.query.endDate as string) || undefined;
+    const orderId = req.query.orderId ? parseInt(req.query.orderId as string, 10) : undefined;
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 20;
+
+    const results = await searchOrders(tenant, {
+      query,
+      deliveryType,
+      status,
+      period,
+      startDate,
+      endDate,
+      orderId,
+      limit
+    });
+    res.json(results);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -160,10 +177,176 @@ restRouter.get('/order-details', async (req: Request, res: Response) => {
 restRouter.get('/delivery-orders', async (req: Request, res: Response) => {
   try {
     const tenant = (req.query.tenant as string) || undefined;
-    const period = (req.query.period as string) || 'today';
-    const platform = (req.query.platform as string) || 'all';
-    const deliveries = await getDeliveryOrders(tenant, period, platform);
+    const platform = (req.query.platform as any) || 'all';
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 20;
+    const deliveries = await getDeliveryOrders(tenant, { platform, limit });
     res.json(deliveries);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 13. Purchases Analytics
+restRouter.get('/purchases', async (req: Request, res: Response) => {
+  try {
+    const tenant = (req.query.tenant as string) || undefined;
+    const period = (req.query.period as string) || 'this_month';
+    const startDate = (req.query.startDate as string) || undefined;
+    const endDate = (req.query.endDate as string) || undefined;
+    const supplierId = (req.query.supplierId as string) || undefined;
+    const warehouse = (req.query.warehouse as string) || undefined;
+    const purchases = await getPurchasesAnalytics(tenant, period, startDate, endDate, supplierId, warehouse);
+    res.json(purchases);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 14. Search Purchases
+restRouter.get('/purchases/search', async (req: Request, res: Response) => {
+  try {
+    const tenant = (req.query.tenant as string) || undefined;
+    const query = (req.query.query as string) || undefined;
+    const supplierId = (req.query.supplierId as string) || undefined;
+    const warehouse = (req.query.warehouse as string) || undefined;
+    const period = (req.query.period as string) || undefined;
+    const startDate = (req.query.startDate as string) || undefined;
+    const endDate = (req.query.endDate as string) || undefined;
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 25;
+
+    const items = await searchPurchases(tenant, {
+      query,
+      supplierId,
+      warehouse,
+      period,
+      startDate,
+      endDate,
+      limit
+    });
+    res.json(items);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 15. Purchase Details
+restRouter.get('/purchases/details', async (req: Request, res: Response) => {
+  try {
+    const invoiceCode = (req.query.invoiceCode as string) || (req.query.code as string) || (req.query.id as string);
+    const tenant = (req.query.tenant as string) || undefined;
+    if (!invoiceCode) return res.status(400).json({ error: 'invoiceCode or code is required' });
+    const details = await getPurchaseDetails(invoiceCode, tenant);
+    res.json(details);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 16. Inventory Acts
+restRouter.get('/inventory/acts', async (req: Request, res: Response) => {
+  try {
+    const tenant = (req.query.tenant as string) || undefined;
+    const period = (req.query.period as string) || 'all';
+    const startDate = (req.query.startDate as string) || undefined;
+    const endDate = (req.query.endDate as string) || undefined;
+    const warehouse = (req.query.warehouse as string) || undefined;
+    const status = (req.query.status as string) || 'all';
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 25;
+
+    const acts = await getInventoryActs(tenant, {
+      period,
+      startDate,
+      endDate,
+      warehouse,
+      status,
+      limit
+    });
+    res.json(acts);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 17. Inventory Act Details
+restRouter.get('/inventory/act-details', async (req: Request, res: Response) => {
+  try {
+    const actId = req.query.actId ? parseInt(req.query.actId as string, 10) : (req.query.id ? parseInt(req.query.id as string, 10) : 0);
+    const tenant = (req.query.tenant as string) || undefined;
+    if (!actId) return res.status(400).json({ error: 'actId is required' });
+    const details = await getInventoryActDetails(actId, tenant);
+    res.json(details);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 18. Inventory Discrepancy Summary
+restRouter.get('/inventory/discrepancies', async (req: Request, res: Response) => {
+  try {
+    const tenant = (req.query.tenant as string) || undefined;
+    const period = (req.query.period as string) || 'this_month';
+    const startDate = (req.query.startDate as string) || undefined;
+    const endDate = (req.query.endDate as string) || undefined;
+    const discrepancies = await getInventoryDiscrepancySummary(tenant, period, startDate, endDate);
+    res.json(discrepancies);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 19. Recipe Calculations
+restRouter.get('/recipes/calculations', async (req: Request, res: Response) => {
+  try {
+    const tenant = (req.query.tenant as string) || undefined;
+    const category = (req.query.category as string) || undefined;
+    const type = (req.query.type as any) || 'all';
+    const search = (req.query.search as string) || undefined;
+    const minFoodCost = req.query.minFoodCost ? parseFloat(req.query.minFoodCost as string) : undefined;
+    const maxFoodCost = req.query.maxFoodCost ? parseFloat(req.query.maxFoodCost as string) : undefined;
+    const missingRecipesOnly = req.query.missingRecipesOnly === 'true' || req.query.missingRecipesOnly === '1';
+    const includeDisabled = req.query.includeDisabled === 'true' || req.query.includeDisabled === '1';
+    const sortBy = (req.query.sortBy as any) || 'food_cost_pct';
+    const sortDirection = (req.query.sortDirection as any) || 'desc';
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+
+    const data = await getRecipeCalculations(tenant, {
+      category,
+      type,
+      search,
+      minFoodCost,
+      maxFoodCost,
+      missingRecipesOnly,
+      includeDisabled,
+      sortBy,
+      sortDirection,
+      limit
+    });
+    res.json(data);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 20. Dish Recipe Details
+restRouter.get('/recipes/dish-details', async (req: Request, res: Response) => {
+  try {
+    const dish = (req.query.dish as string) || (req.query.itemId as string) || (req.query.name as string);
+    const tenant = (req.query.tenant as string) || undefined;
+    if (!dish) return res.status(400).json({ error: 'dish parameter is required (name, ID or hash)' });
+    const details = await getDishRecipeDetails(dish, tenant);
+    res.json(details);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 21. Semi-Finished Products
+restRouter.get('/recipes/semi-finished', async (req: Request, res: Response) => {
+  try {
+    const tenant = (req.query.tenant as string) || undefined;
+    const search = (req.query.search as string) || undefined;
+    const semi = await getSemiFinishedAnalytics(tenant, search);
+    res.json(semi);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -175,8 +358,8 @@ export function getOpenApiSchema(baseUrl = 'https://mcp.restiq.ge') {
     openapi: '3.0.0',
     info: {
       title: 'RestIQ POS & Restaurant Analytics API',
-      description: 'API for real-time restaurant revenue, shift X/Z reports, sales, top menu items, expenses, delivery and inventory analytics.',
-      version: '1.0.0'
+      description: 'API for real-time restaurant revenue, shift X/Z reports, sales, top menu items, expenses, purchases, inventories, and recipe costings.',
+      version: '1.1.0'
     },
     servers: [
       {
@@ -189,107 +372,41 @@ export function getOpenApiSchema(baseUrl = 'https://mcp.restiq.ge') {
           operationId: 'getTodaySummary',
           summary: 'Get today financial summary (Revenue, Cash In Drawer, Average Check, Discounts)',
           parameters: [
-            { name: 'tenant', in: 'query', required: false, schema: { type: 'string' }, description: 'Tenant name or slug (e.g., teatro, ajarapalace)' },
+            { name: 'tenant', in: 'query', required: false, schema: { type: 'string' }, description: 'Tenant name or slug' },
             { name: 'date', in: 'query', required: false, schema: { type: 'string' }, description: 'Date YYYY-MM-DD (defaults to today)' }
           ],
           responses: { '200': { description: 'Successful response' } }
         }
       },
-      '/api/shift-report': {
+      '/api/purchases': {
         get: {
-          operationId: 'getShiftReport',
-          summary: 'Get current active cash shift X/Z report with cashier name, cash vs card sales and discrepancy',
+          operationId: 'getPurchasesAnalytics',
+          summary: 'Get procurement and purchases analytics aggregated by period, suppliers and warehouses',
           parameters: [
-            { name: 'tenant', in: 'query', required: false, schema: { type: 'string' }, description: 'Tenant name or slug' },
-            { name: 'shiftId', in: 'query', required: false, schema: { type: 'integer' }, description: 'Shift ID (optional, defaults to active shift)' }
-          ],
-          responses: { '200': { description: 'Successful response' } }
-        }
-      },
-      '/api/sales': {
-        get: {
-          operationId: 'getSalesAnalytics',
-          summary: 'Get detailed sales analytics aggregated by period, halls and hourly distribution',
-          parameters: [
-            { name: 'tenant', in: 'query', required: false, schema: { type: 'string' }, description: 'Tenant name or slug' },
-            { name: 'period', in: 'query', required: false, schema: { type: 'string', enum: ['today', 'yesterday', 'this_week', 'this_month', 'last_month', 'custom'] } },
-            { name: 'startDate', in: 'query', required: false, schema: { type: 'string' }, description: 'YYYY-MM-DD for custom period' },
-            { name: 'endDate', in: 'query', required: false, schema: { type: 'string' }, description: 'YYYY-MM-DD for custom period' }
-          ],
-          responses: { '200': { description: 'Successful response' } }
-        }
-      },
-      '/api/top-items': {
-        get: {
-          operationId: 'getTopSellingItems',
-          summary: 'Get top selling dishes, drinks and hookah items classified into Kitchen, Bar and Hookah',
-          parameters: [
-            { name: 'tenant', in: 'query', required: false, schema: { type: 'string' }, description: 'Tenant name or slug' },
-            { name: 'period', in: 'query', required: false, schema: { type: 'string', enum: ['today', 'yesterday', 'this_week', 'this_month', 'last_month', 'custom'] } },
-            { name: 'limit', in: 'query', required: false, schema: { type: 'integer' }, description: 'Number of items to return (default 10)' }
-          ],
-          responses: { '200': { description: 'Successful response' } }
-        }
-      },
-      '/api/expenses': {
-        get: {
-          operationId: 'getExpensesAnalytics',
-          summary: 'Get expenses breakdown (supplier payments, cash drawer payouts, write-offs)',
-          parameters: [
-            { name: 'tenant', in: 'query', required: false, schema: { type: 'string' }, description: 'Tenant name or slug' },
+            { name: 'tenant', in: 'query', required: false, schema: { type: 'string' } },
             { name: 'period', in: 'query', required: false, schema: { type: 'string', enum: ['today', 'yesterday', 'this_week', 'this_month', 'last_month', 'custom'] } }
           ],
           responses: { '200': { description: 'Successful response' } }
         }
       },
-      '/api/inventory-alerts': {
+      '/api/inventory/acts': {
         get: {
-          operationId: 'getInventoryAlerts',
-          summary: 'Get inventory stock alerts and out-of-stock / zero-stock items',
+          operationId: 'getInventoryActs',
+          summary: 'List inventory acts with shortage, surplus and net discrepancies',
           parameters: [
-            { name: 'tenant', in: 'query', required: false, schema: { type: 'string' }, description: 'Tenant name or slug' },
-            { name: 'threshold', in: 'query', required: false, schema: { type: 'number' }, description: 'Min stock threshold (default 0)' }
+            { name: 'tenant', in: 'query', required: false, schema: { type: 'string' } }
           ],
           responses: { '200': { description: 'Successful response' } }
         }
       },
-      '/api/active-orders': {
+      '/api/recipes/calculations': {
         get: {
-          operationId: 'getActiveOrders',
-          summary: 'Get real-time currently occupied tables and active open orders in the restaurant',
+          operationId: 'getRecipeCalculations',
+          summary: 'Get dish prime costs, food cost %, and gross margin',
           parameters: [
-            { name: 'tenant', in: 'query', required: false, schema: { type: 'string' }, description: 'Tenant name or slug' }
+            { name: 'tenant', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'minFoodCost', in: 'query', required: false, schema: { type: 'number' } }
           ],
-          responses: { '200': { description: 'Successful response' } }
-        }
-      },
-      '/api/staff-performance': {
-        get: {
-          operationId: 'getStaffPerformance',
-          summary: 'Get waiter/cashier sales leaderboard and order counts',
-          parameters: [
-            { name: 'tenant', in: 'query', required: false, schema: { type: 'string' }, description: 'Tenant name or slug' },
-            { name: 'period', in: 'query', required: false, schema: { type: 'string', enum: ['today', 'yesterday', 'this_week', 'this_month', 'last_month', 'custom'] } }
-          ],
-          responses: { '200': { description: 'Successful response' } }
-        }
-      },
-      '/api/delivery-orders': {
-        get: {
-          operationId: 'getDeliveryOrders',
-          summary: 'Get delivery platform orders (Glovo, Wolt, Bolt Food, Web QR Delivery)',
-          parameters: [
-            { name: 'tenant', in: 'query', required: false, schema: { type: 'string' }, description: 'Tenant name or slug' },
-            { name: 'period', in: 'query', required: false, schema: { type: 'string', enum: ['today', 'yesterday', 'this_week', 'this_month'] } },
-            { name: 'platform', in: 'query', required: false, schema: { type: 'string', enum: ['all', 'glovo', 'wolt', 'bolt', 'web'] } }
-          ],
-          responses: { '200': { description: 'Successful response' } }
-        }
-      },
-      '/api/tenants': {
-        get: {
-          operationId: 'listTenants',
-          summary: 'List available restaurants and venue branches in the system',
           responses: { '200': { description: 'Successful response' } }
         }
       }
